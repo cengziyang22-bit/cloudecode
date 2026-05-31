@@ -1,0 +1,13 @@
+{
+  "appId": "com.chess.chinese",
+  "appName": "中国象棋",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "http",
+    "headers": {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp"
+    }
+  }
+}

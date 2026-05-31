@@ -1,0 +1,22 @@
+{
+  "name": "chinese-chess",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@capacitor/android": "^8.3.4",
+    "@capacitor/cli": "^8.3.4",
+    "@capacitor/core": "^8.3.4",
+    "fairy-stockfish-nnue.wasm": "^1.1.11",
+    "ffish": "^0.7.9",
+    "sl-wukong-engine": "^1.0.0",
+    "xiangqii": "^1.0.1"
+  }
+}

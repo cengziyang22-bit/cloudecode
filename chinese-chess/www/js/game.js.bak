@@ -1,0 +1,1509 @@
+// game.js — 游戏主控、UI渲染、人机对战流程
+'use strict';
+
+import {
+  ROWS, COLS, RED, BLACK, PIECE, PIECE_NAMES,
+  createPiece, opponent, initBoard as createBoard,
+  getLegalMoves, isInCheck, hasAnyLegalMove, findGeneral,
+  uciToMove
+} from './board.js';
+import { initEngine, getBestMove, destroyEngine, stopEngine } from './ai.js';
+import { analyzePosition } from './analysis-engine.js';
+import { hostSession, connectGuest, acceptOffer, disconnect, sendMove, sendResign,
+         onRoomCreated, onGameStart, onOpponentMove, onOpponentResigned,
+         onOpponentDisconnected, onIceFailed, onChat, onError,
+         compressSDP, normalizeSDP,
+         getMyColor, isConnected } from './online.js';
+import { playMoveSound, playCaptureSound, playCheckSound, playCheckmateSound, preloadSounds, playCheckmateTypeVoice } from './sound.js';
+import { detectCheckmateType } from './checkmate.js';
+
+// ============ 游戏状态 ============
+let board, currentTurn, selectedPos, legalMoves, moveHistory;
+let capturedPieces, gameOver, inCheck;
+let gameMode = 'pvp'; // 'pvp' | 'ai' | 'online' | 'custom'
+let aiThinking = false;
+let analysisHint = null; // { fromR, fromC, toR, toC } | null
+let onlineReady = false;      // 联机房间双方就绪
+let onlineColor = null;       // 我方颜色 (RED/BLACK)
+let isEditing = false;        // 编辑器模式
+let editorPiece = { type: PIECE.GENERAL, color: RED }; // 编辑器当前选中棋子
+
+// ============ 赛后分析状态 ============
+let postGameEvals = [];
+let isPostGameAnalysis = false;
+let analysisMoveIndex = -1;
+let isAnalysisRunning = false;
+let analysisQueue = [];       // 待分析队列（moveIndex）
+let isProcessingAnalysis = false;
+
+// ============ 游戏设置 ============
+let gameSettings = { totalTime: null, moveTime: null, difficulty: 10, aiColor: 'red' };
+
+// ============ 计时器状态 ============
+let redTimeRemaining = null;
+let blackTimeRemaining = null;
+let moveTimeRemaining = null; // 当前步剩余毫秒
+let moveStartTime = null;
+let lastTotalTimeSample = null;
+let timerInterval = null;
+
+// ============ 纹理预加载 ============
+let textureImages = {};
+function preloadTextures() {
+  var map = {
+    'wood-pattern': 'img/wood-pattern.png',
+    'dark-wood': 'img/dark-wood.png',
+    'retina-wood': 'img/retina-wood.png',
+    'paper': 'img/paper.png',
+    'wood-clean': 'img/wood-clean.png'
+  };
+  var keys = Object.keys(map);
+  keys.forEach(function(k) {
+    var img = new Image();
+    img.src = map[k];
+    img.onload = function() { textureImages[k] = img; if (document.getElementById('board').querySelector('canvas')) drawBoardLines(); };
+    img.onerror = function() { console.warn('[Texture] load failed:', k); };
+  });
+}
+
+// ============ 皮肤主题 ============
+const THEMES = {
+  classic: {
+    name: '经典木纹',
+    bodyBg: '#c8944a', boardBg: '#d4a854', boardLine: '#3e2723',
+    pieceBgRed: 'radial-gradient(circle at 35% 32%,#fff8e8 0%,#f5e0b0 25%,#e2c090 70%,#c89860 100%)',
+    pieceBgBlack: 'radial-gradient(circle at 35% 32%,#fff8e8 0%,#f5e0b0 25%,#e2c090 70%,#c89860 100%)',
+    pieceBorder: '#5d4037', pieceRed: '#b71c1c', pieceBlack: '#1a1a1a',
+    turnBg: '#3e2723', turnText: '#ffd54f',
+    infoBg: 'rgba(255,255,255,0.3)',
+    texture: 'wood-clean'
+  },
+  rosewood: {
+    name: '红木',
+    bodyBg: '#3a1000', boardBg: '#5a2a10', boardLine: '#1a0500',
+    pieceBgRed: 'radial-gradient(circle at 35% 32%,#ffe8d0 0%,#f0c898 25%,#d4a068 70%,#b07840 100%)',
+    pieceBgBlack: 'radial-gradient(circle at 35% 32%,#ffe8d0 0%,#f0c898 25%,#d4a068 70%,#b07840 100%)',
+    pieceBorder: '#3a1000', pieceRed: '#d4a060', pieceBlack: '#f5ead0',
+    turnBg: '#1a0500', turnText: '#d4a060',
+    infoBg: 'rgba(255,255,255,0.15)',
+    texture: 'dark-wood'
+  },
+  porcelain: {
+    name: '青花瓷',
+    bodyBg: '#c8c0b0', boardBg: '#ece5d8', boardLine: '#1a3050',
+    pieceBgRed: 'radial-gradient(circle at 35% 32%,#ffffff 0%,#f0ece4 25%,#e0d8cc 70%,#c8bfb0 100%)',
+    pieceBgBlack: 'radial-gradient(circle at 35% 32%,#ffffff 0%,#f0ece4 25%,#e0d8cc 70%,#c8bfb0 100%)',
+    pieceBorder: '#2a4070', pieceRed: '#1a4070', pieceBlack: '#1a1a2e',
+    turnBg: '#1a3050', turnText: '#e8d8c0',
+    infoBg: 'rgba(255,255,255,0.45)',
+    texture: 'paper'
+  },
+  ink: {
+    name: '水墨',
+    bodyBg: '#d5cdb8', boardBg: '#e8e0d0', boardLine: '#3a3028',
+    pieceBgRed: 'radial-gradient(circle at 35% 32%,#fefcf6 0%,#f0e8d4 25%,#e0d4bc 70%,#c8b898 100%)',
+    pieceBgBlack: 'radial-gradient(circle at 35% 32%,#fefcf6 0%,#f0e8d4 25%,#e0d4bc 70%,#c8b898 100%)',
+    pieceBorder: '#4a3a28', pieceRed: '#8b2500', pieceBlack: '#2a1a0a',
+    turnBg: '#3a3028', turnText: '#e8d8b8',
+    infoBg: 'rgba(255,255,255,0.4)',
+    texture: 'paper'
+  }
+};
+let currentTheme = 'classic';
+
+function applyTheme(name) {
+  currentTheme = name || 'classic';
+  var t = THEMES[currentTheme];
+  var root = document.documentElement.style;
+  root.setProperty('--body-bg', t.bodyBg);
+  root.setProperty('--piece-bg-red', t.pieceBgRed);
+  root.setProperty('--piece-bg-black', t.pieceBgBlack);
+  root.setProperty('--piece-border', t.pieceBorder);
+  root.setProperty('--piece-red', t.pieceRed);
+  root.setProperty('--piece-black', t.pieceBlack);
+  root.setProperty('--turn-bg', t.turnBg);
+  root.setProperty('--turn-text', t.turnText);
+  root.setProperty('--info-bg', t.infoBg);
+}
+
+export function getGameMode() { return gameMode; }
+export function isAiThinking() { return aiThinking; }
+
+// 从开始界面初始化游戏
+export function initGame(mode, settings) {
+  gameMode = mode || 'pvp';
+  if (settings) {
+    gameSettings.totalTime = settings.totalTime;
+    gameSettings.moveTime = settings.moveTime;
+    gameSettings.difficulty = settings.difficulty || 10;
+    if (settings.aiColor) gameSettings.aiColor = settings.aiColor;
+    if (settings.theme) applyTheme(settings.theme);
+  }
+  preloadSounds();
+  preloadTextures();
+  document.querySelectorAll('.mode-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.mode === gameMode);
+  });
+  document.getElementById('analysisPanel').style.display = 'none';
+  document.getElementById('btnAnalyze').textContent = '分析局面';
+  if (gameMode === 'online') {
+    setupOnlineCallbacks();
+    document.getElementById('onlinePanel').style.display = 'flex';
+    document.getElementById('onlineStatusBar').style.display = 'none';
+    document.getElementById('sdpPanel').style.display = 'flex';
+    document.getElementById('sdpOutput').style.display = 'none';
+    document.getElementById('sdpInput').style.display = 'none';
+    onlineReady = false;
+    onlineColor = null;
+  } else if (gameMode === 'custom') {
+    document.getElementById('onlinePanel').style.display = 'none';
+    document.getElementById('onlineStatusBar').style.display = 'none';
+  } else {
+    initEngine().catch(function(e) {
+      document.getElementById('aiStatus').textContent = 'AI加载失败: ' + e.message;
+    });
+    document.getElementById('onlinePanel').style.display = 'none';
+    document.getElementById('onlineStatusBar').style.display = 'none';
+  }
+  if (gameMode === 'custom') {
+    enterEditor();
+  } else {
+    newGame();
+  }
+}
+
+// ============ 初始化 ============
+export function newGame() {
+  board = createBoard();
+  currentTurn = RED;
+  analysisHint = null;
+  selectedPos = null;
+  legalMoves = [];
+  moveHistory = [];
+  capturedPieces = { [RED]: [], [BLACK]: [] };
+  gameOver = false;
+  inCheck = false;
+  aiThinking = false;
+  isPostGameAnalysis = false;
+  analysisMoveIndex = -1;
+  isAnalysisRunning = false;
+  isProcessingAnalysis = false;
+  analysisQueue = [];
+  postGameEvals = [];
+  document.getElementById('checkWarning').innerHTML = '';
+  document.getElementById('message').style.display = 'none';
+  var vm = document.getElementById('victoryMessage');
+  vm.classList.remove('show');
+  vm.textContent = '';
+  document.getElementById('aiStatus').textContent = '';
+  updateTurnIndicator();
+
+  // 重置计时器
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  redTimeRemaining = gameSettings.totalTime ? gameSettings.totalTime * 1000 : null;
+  blackTimeRemaining = gameSettings.totalTime ? gameSettings.totalTime * 1000 : null;
+  moveTimeRemaining = null;
+  moveStartTime = null;
+  lastTotalTimeSample = null;
+  updateTimerDisplay();
+  startTimer();
+  // 开局即开始计时
+  if (gameSettings.totalTime) { moveStartTime = Date.now(); lastTotalTimeSample = Date.now(); }
+
+  render();
+
+  // AI 执红时自动走第一步
+  if (gameMode === 'ai' && gameSettings.aiColor === 'black') {
+    moveStartTime = Date.now(); lastTotalTimeSample = Date.now();
+    initEngine().then(() => { if (!gameOver) triggerAI(); }).catch(() => {});
+  }
+}
+
+export function setGameMode(mode) {
+  // 离开编辑器模式时清理
+  if (isEditing && mode !== 'custom') {
+    isEditing = false;
+    document.getElementById('editorPanel').style.display = 'none';
+    var infoEl = document.querySelector('.info-panel'); if (infoEl) infoEl.style.display = '';
+    document.getElementById('timerRow').style.display = '';
+    document.getElementById('controls').style.display = '';
+    var modeEl = document.querySelector('.mode-selector'); if (modeEl) modeEl.style.display = '';
+    document.getElementById('redTimer').style.display = '';
+    document.getElementById('blackTimer').style.display = '';
+    updateTurnIndicator();
+  }
+  gameMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  if (gameMode === 'ai') {
+    initEngine().catch(e => {
+      document.getElementById('aiStatus').textContent = 'AI加载失败: ' + e.message;
+    });
+  }
+  if (gameMode === 'online') {
+    setupOnlineCallbacks();
+    document.getElementById('onlinePanel').style.display = 'flex';
+    document.getElementById('onlineStatusBar').style.display = 'none';
+    document.getElementById('sdpPanel').style.display = 'flex';
+    document.getElementById('sdpOutput').style.display = 'none';
+    document.getElementById('sdpInput').style.display = 'none';
+  }
+  if (gameMode !== 'online') {
+    disconnect();
+    onlineReady = false;
+    onlineColor = null;
+    document.getElementById('onlinePanel').style.display = 'none';
+    document.getElementById('onlineStatusBar').style.display = 'none';
+  }
+  if (gameMode === 'custom') {
+    enterEditor();
+  } else {
+    newGame();
+  }
+}
+
+// ============ 计时器 ============
+function getAIThinkTime() {
+  var level = gameSettings.difficulty || 10;
+  var baseTime = 500 + (level - 1) * 500; // 1→500ms ... 10→5000ms
+  if (gameSettings.moveTime) {
+    var maxThink = (gameSettings.moveTime - 2) * 1000;
+    if (maxThink < 500) maxThink = 500;
+    return Math.min(baseTime, maxThink);
+  }
+  return baseTime;
+}
+
+function formatTime(ms) {
+  if (ms === null || ms === undefined) return '--:--';
+  if (ms <= 0) return '00:00';
+  var totalSec = Math.ceil(ms / 1000);
+  var min = Math.floor(totalSec / 60);
+  var sec = totalSec % 60;
+  return (min < 10 ? '0' : '') + min + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+function updateTimerDisplay() {
+  document.getElementById('redTimerTime').textContent = formatTime(redTimeRemaining);
+  document.getElementById('blackTimerTime').textContent = formatTime(blackTimeRemaining);
+  // 步时显示
+  var redMoveEl = document.getElementById('redMoveTime');
+  var blackMoveEl = document.getElementById('blackMoveTime');
+  if (gameSettings.moveTime && moveTimeRemaining !== null && !gameOver) {
+    var moveSec = Math.ceil(moveTimeRemaining / 1000);
+    var moveText = '[' + moveSec + 's]';
+    document.getElementById('redMoveTime').textContent = currentTurn === RED ? moveText : '';
+    document.getElementById('blackMoveTime').textContent = currentTurn === BLACK ? moveText : '';
+    document.getElementById('redMoveTime').className = 'move-time' + (currentTurn === RED && moveSec <= 5 ? ' low-time' : '');
+    document.getElementById('blackMoveTime').className = 'move-time' + (currentTurn === BLACK && moveSec <= 5 ? ' low-time' : '');
+  } else {
+    document.getElementById('redMoveTime').textContent = '';
+    document.getElementById('blackMoveTime').textContent = '';
+  }
+  var redEl = document.getElementById('redTimer');
+  var blackEl = document.getElementById('blackTimer');
+  redEl.classList.toggle('active-timer', currentTurn === RED && !gameOver);
+  blackEl.classList.toggle('active-timer', currentTurn === BLACK && !gameOver);
+  redEl.classList.toggle('low-time', redTimeRemaining !== null && redTimeRemaining < 30000 && currentTurn === RED);
+  blackEl.classList.toggle('low-time', blackTimeRemaining !== null && blackTimeRemaining < 30000 && currentTurn === BLACK);
+}
+
+function startTimer() {
+  if (gameMode === 'online' && !onlineReady) return;
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(function() {
+    if (gameOver) return;
+    var now = Date.now();
+    // 步时倒计时（在 moveStartTime 被总时更新前先算）
+    if (moveStartTime && gameSettings.moveTime) {
+      moveTimeRemaining = gameSettings.moveTime * 1000 - (now - moveStartTime);
+      if (moveTimeRemaining <= 0) {
+        handleTimeUp(currentTurn);
+        return;
+      }
+    } else {
+      moveTimeRemaining = null;
+    }
+    // 总时间（用独立变量避免干扰 moveStartTime）
+    if (lastTotalTimeSample && gameSettings.totalTime) {
+      var elapsed = now - lastTotalTimeSample;
+      lastTotalTimeSample = now;
+      if (currentTurn === RED && redTimeRemaining !== null) {
+        redTimeRemaining = Math.max(0, redTimeRemaining - elapsed);
+        if (redTimeRemaining <= 0) { handleTimeUp(RED); return; }
+      } else if (currentTurn === BLACK && blackTimeRemaining !== null) {
+        blackTimeRemaining = Math.max(0, blackTimeRemaining - elapsed);
+        if (blackTimeRemaining <= 0) { handleTimeUp(BLACK); return; }
+      }
+    }
+    updateTimerDisplay();
+  }, 200);
+}
+
+function handleTimeUp(color) {
+  gameOver = true;
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  stopEngine();
+  document.getElementById('btnAnalyze').textContent = '赛后分析';
+  var loser = color === RED ? '红方' : '黑方';
+  var win = color === RED ? '黑方' : '红方';
+  document.getElementById('message').textContent = loser + '超时判负';
+  document.getElementById('message').style.display = 'block';
+  showVictoryMessage(win + '获胜');
+  updateTimerDisplay();
+  render();
+}
+
+export function cleanupGame() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  moveStartTime = null; lastTotalTimeSample = null;
+  stopEngine();
+  if (isEditing) {
+    isEditing = false;
+    document.getElementById('editorPanel').style.display = 'none';
+    var infoEl = document.querySelector('.info-panel'); if (infoEl) infoEl.style.display = '';
+    document.getElementById('timerRow').style.display = '';
+    document.getElementById('controls').style.display = '';
+    var modeEl = document.querySelector('.mode-selector'); if (modeEl) modeEl.style.display = '';
+    document.getElementById('redTimer').style.display = '';
+    document.getElementById('blackTimer').style.display = '';
+  }
+}
+
+// ============ 事件处理 ============
+export function onPieceClick(row, col) {
+  if (isEditing) { editPlacePiece(row, col); return; }
+  if (gameOver || aiThinking) return;
+  if (gameMode === 'ai' && currentTurn !== (gameSettings.aiColor === 'red' ? RED : BLACK)) return;
+  if (gameMode === 'online' && currentTurn !== onlineColor) return;
+
+  var piece = board[row][col];
+  // 已选棋子时，点击对方棋子→吃子
+  if (selectedPos && piece && piece.color !== currentTurn) {
+    if (isLegalTarget(row, col)) {
+      makeMove(selectedPos.row, selectedPos.col, row, col);
+      selectedPos = null; legalMoves = [];
+    } else { selectedPos = null; legalMoves = []; render(); }
+    return;
+  }
+  if (!piece || piece.color !== currentTurn) return;
+  if (selectedPos && selectedPos.row === row && selectedPos.col === col) {
+    selectedPos = null; legalMoves = [];
+  } else {
+    selectedPos = { row, col };
+    legalMoves = getLegalMoves(row, col, piece.color, piece.type, board);
+  }
+  render();
+}
+
+export function onCellClick(row, col) {
+  if (isEditing) { editPlacePiece(row, col); return; }
+  if (gameOver || aiThinking || !selectedPos) return;
+  if (!isLegalTarget(row, col)) { selectedPos = null; legalMoves = []; render(); return; }
+  makeMove(selectedPos.row, selectedPos.col, row, col);
+  selectedPos = null; legalMoves = [];
+}
+
+function isLegalTarget(row, col) {
+  for (var i = 0; i < legalMoves.length; i++)
+    if (legalMoves[i].row === row && legalMoves[i].col === col) return true;
+  return false;
+}
+
+// ============ 特效 ============
+function cellToScreen(row, col) {
+  var boardEl = document.getElementById('board');
+  var rect = boardEl.getBoundingClientRect();
+  var cellW = rect.width / COLS;
+  var cellH = rect.height / ROWS;
+  return {
+    x: rect.left + col * cellW + cellW / 2,
+    y: rect.top + row * cellH + cellH / 2
+  };
+}
+
+function triggerInkEffect(row, col, text, type) {
+  var overlay = document.getElementById('effectOverlay');
+  var ink = document.createElement('div');
+  ink.className = 'effect-ink' + (type ? ' ' + type : '');
+  ink.setAttribute('data-text', text);
+  ink.style.left = '50%';
+  ink.style.top = '50%';
+  overlay.appendChild(ink);
+  setTimeout(function() { ink.remove(); }, 1400);
+}
+
+// ============ 走棋逻辑 ============
+function makeMove(fromR, fromC, toR, toC) {
+  // 每步限时检查
+  if (gameSettings.moveTime && moveStartTime) {
+    if ((Date.now() - moveStartTime) / 1000 > gameSettings.moveTime) {
+      handleTimeUp(currentTurn);
+      return;
+    }
+  }
+  analysisHint = null;
+  selectedPos = null;
+  legalMoves = [];
+  var piece = board[fromR][fromC];
+  var captured = board[toR][toC];
+  moveHistory.push({
+    fromR, fromC, toR, toC,
+    piece: { type: piece.type, color: piece.color },
+    captured: captured ? { type: captured.type, color: captured.color } : null
+  });
+  if (captured) {
+    capturedPieces[captured.color].push(captured);
+    triggerInkEffect(toR, toC, '吃', '');
+    playCaptureSound();
+  } else {
+    playMoveSound();
+  }
+  board[toR][toC] = piece;
+  board[fromR][fromC] = null;
+
+  var opp = opponent(piece.color);
+  inCheck = isInCheck(opp, board);
+
+  if (!hasAnyLegalMove(opp, board)) {
+    gameOver = true;
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    document.getElementById('btnAnalyze').textContent = '赛后分析';
+    // 检测绝杀类型
+    var lastMoveData = moveHistory.length > 0 ? moveHistory[moveHistory.length - 1] : null;
+    var mateType = detectCheckmateType(board, lastMoveData, moveHistory);
+    // 先报种类（TTS），播完再报"绝杀"（音效）
+    playCheckmateTypeVoice(mateType, function() {
+      setTimeout(function() { playCheckmateSound(); }, 200);
+    });
+    // 文字显示在特效上
+    var g = findGeneral(opp, board);
+    if (g) triggerInkEffect(g.row, g.col, mateType, 'checkmate');
+    var winner = piece.color === RED ? '红方' : '黑方';
+    setTimeout(function() { showVictoryMessage(mateType + '！' + winner + '获胜'); }, 1400);
+  } else if (inCheck) {
+    playCheckSound();
+    var gen = findGeneral(opp, board);
+    if (gen) triggerInkEffect(gen.row, gen.col, '将军', 'check');
+    document.getElementById('checkWarning').innerHTML = '<span class="check-icon"></span>将军！';
+  } else {
+    document.getElementById('checkWarning').innerHTML = '';
+  }
+  currentTurn = opp;
+  updateTurnIndicator();
+  render();
+
+  // 联机模式：发送走法给对方
+  if (gameMode === 'online' && piece.color === onlineColor) {
+    sendMove(fromR, fromC, toR, toC);
+  }
+
+  // 人机模式：玩家走完后触发 AI
+  moveStartTime = Date.now(); lastTotalTimeSample = Date.now();
+  enqueueAnalysis(moveHistory.length - 1);
+  if (!gameOver) {
+    if (gameMode === 'ai' && currentTurn === (gameSettings.aiColor === 'red' ? BLACK : RED)) {
+      triggerAI();
+    } else {
+      processAnalysisQueue(); // PvP/联机：引擎空闲，立即后台分析
+    }
+  }
+}
+
+async function triggerAI() {
+  aiThinking = true;
+  document.getElementById('aiStatus').textContent = 'AI 思考中...';
+  updateTurnIndicator();
+  render();
+
+  try {
+    var thinkTime = getAIThinkTime();
+    var move = await getBestMove(board, currentTurn, thinkTime);
+    if (move && !gameOver) {
+      makeMove(move.fromR, move.fromC, move.toR, move.toC);
+    }
+  } catch (e) {
+    document.getElementById('aiStatus').textContent = 'AI 出错: ' + e.message;
+  }
+  aiThinking = false;
+  processAnalysisQueue(); // 触发后台分析队列
+  if (!gameOver) document.getElementById('aiStatus').textContent = '';
+  updateTurnIndicator();
+  render();
+}
+
+// ============ 局面分析 ============
+export function closeAnalysis() {
+  document.getElementById('analysisPanel').style.display = 'none';
+  document.getElementById('btnAnalyze').textContent = '分析局面';
+  analysisHint = null;
+  stopEngine();
+  render();
+}
+
+export async function triggerAnalysis() {
+  if (aiThinking) return;
+  if (gameOver) {
+    startPostGameAnalysis();
+    return;
+  }
+
+  var panel = document.getElementById('analysisPanel');
+  if (panel.style.display === 'block') {
+    closeAnalysis();
+    return;
+  }
+
+  panel.style.display = 'block';
+  document.getElementById('analysisScore').textContent = '引擎加载中...';
+  document.getElementById('analysisDepth').textContent = '';
+  document.getElementById('analysisPv').textContent = '';
+  document.getElementById('btnAnalyze').textContent = '停止分析';
+
+  try {
+    await initEngine();
+  } catch (e) {
+    document.getElementById('analysisScore').textContent = '引擎加载失败';
+    document.getElementById('btnAnalyze').textContent = '分析局面';
+    return;
+  }
+
+  document.getElementById('analysisScore').textContent = '分析中...';
+
+  analyzePosition(board, currentTurn, function(info) {
+    // 更新分析结果
+    var scoreEl = document.getElementById('analysisScore');
+    if (info.scoreType === 'cp') {
+      var cp = info.score / 100;
+      var sign = cp >= 0 ? '+' : '';
+      var adv = cp > 0 ? '红方优势' : cp < 0 ? '黑方优势' : '均势';
+      scoreEl.innerHTML = '<span class="score-val">' + sign + cp.toFixed(1) + '</span><span class="score-label">' + adv + '</span>';
+    } else {
+      var mateIn = info.score;
+      var text = mateIn > 0 ? '红方' + mateIn + '步杀' : '黑方' + Math.abs(mateIn) + '步杀';
+      scoreEl.innerHTML = '<span class="score-val mate">M' + Math.abs(mateIn) + '</span><span class="score-label">' + text + '</span>';
+    }
+    document.getElementById('analysisDepth').textContent = '深度: ' + info.depth;
+    // 解析 PV — 取第一个走法标记在棋盘上
+    if (info.pv) {
+      var pvMoves = info.pv.split(' ');
+      document.getElementById('analysisPv').textContent = '推荐走法: ' + pvMoves.slice(0, 5).join(' → ');
+      console.log('[诊断] 引擎来源:', window.crossOriginIsolated ? 'FSF' : 'Wukong');
+      if (pvMoves.length > 0) {
+        var hint = uciToMove(pvMoves[0]);
+        var srcPiece = board[hint.fromR] && board[hint.fromR][hint.fromC];
+        console.log('[诊断] FSF首步:', pvMoves[0], '→', JSON.stringify(hint),
+          '源格:', srcPiece ? ('有' + (srcPiece.color === 1 ? '红' : '黑') + PIECE_NAMES[srcPiece.color][srcPiece.type]) : '空',
+          '当前执棋:', currentTurn === RED ? '红' : '黑');
+        // 校验走法合法性：源格有己方棋子，目标格在 legal moves 中
+        var legal = true;
+        if (!srcPiece || srcPiece.color !== currentTurn) {
+          legal = false;
+          console.log('[诊断] 源格无效: row=' + hint.fromR + ' col=' + hint.fromC + ' 期望颜色=' + currentTurn);
+        } else {
+          var moves = getLegalMoves(hint.fromR, hint.fromC, currentTurn, srcPiece.type, board);
+          var found = false;
+          for (var mi = 0; mi < moves.length; mi++) {
+            if (moves[mi].row === hint.toR && moves[mi].col === hint.toC) { found = true; break; }
+          }
+          if (!found) {
+            legal = false;
+            console.log('[诊断] 目标格(' + hint.toR + ',' + hint.toC + ') 非法, 合法走法:', moves.map(function(m) { return '(' + m.row + ',' + m.col + ')'; }).join(' '));
+          }
+        }
+        if (legal) {
+          analysisHint = { fromR: hint.fromR, fromC: hint.fromC, toR: hint.toR, toC: hint.toC };
+        } else {
+          analysisHint = null;
+          console.warn('[分析] 引擎返回非法走法:', pvMoves[0], hint);
+        }
+        render();
+      }
+    }
+  }, function(result) {
+    document.getElementById('btnAnalyze').textContent = '分析局面';
+    if (!result) {
+      analysisHint = null;
+      document.getElementById('analysisScore').textContent = '分析失败';
+      render();
+    }
+  });
+}
+
+// ============ 赛后分析 ============
+
+// 重建第 upToIndex 步走完后的棋盘 (-1=初始局面)
+function reconstructBoardState(upToIndex) {
+  if (upToIndex < 0) return { board: createBoard(), currentTurn: RED };
+  var b = createBoard();
+  var limit = upToIndex < moveHistory.length ? upToIndex : moveHistory.length - 1;
+  for (var i = 0; i <= limit; i++) {
+    var m = moveHistory[i];
+    b[m.toR][m.toC] = b[m.fromR][m.fromC];
+    b[m.fromR][m.fromC] = null;
+  }
+  var turn = opponent(moveHistory[limit].piece.color);
+  return { board: b, currentTurn: turn };
+}
+
+// 增量分析队列：每下一步时后台分析，不用等到最后
+function enqueueAnalysis(moveIdx) {
+  if (gameOver || aiThinking) return;
+  if (moveIdx < postGameEvals.length && postGameEvals[moveIdx] !== undefined) return;
+  if (analysisQueue.indexOf(moveIdx) >= 0) return;
+  analysisQueue.push(moveIdx);
+  // processAnalysisQueue 由 makeMove/triggerAI 在引擎空闲时调用
+}
+
+function processAnalysisQueue() {
+  if (analysisQueue.length === 0) { isProcessingAnalysis = false; return; }
+  if (aiThinking || isProcessingAnalysis) return;
+  isProcessingAnalysis = true;
+  var idx = analysisQueue.shift();
+  if (idx < postGameEvals.length && postGameEvals[idx] !== undefined) {
+    isProcessingAnalysis = false;
+    setTimeout(processAnalysisQueue, 20);
+    return;
+  }
+
+  var state = reconstructBoardState(idx);
+  var mover = moveHistory[idx].piece.color;
+  var sideToMove = opponent(mover);
+
+  analyzePosition(state.board, sideToMove, null, function(result) {
+    if (result) {
+      var cp = result.scoreType === 'cp' ? -(result.score) : mateToCp(result.score, mover, sideToMove);
+      postGameEvals[idx] = {
+        moveIdx: idx,
+        side: mover,
+        cp: cp,
+        depth: result.depth || 0,
+        pv: result.pv || '',
+        score: 0,
+        scoreType: result.scoreType,
+        rawScore: result.score
+      };
+    } else {
+      postGameEvals[idx] = null;
+    }
+    isProcessingAnalysis = false;
+    setTimeout(processAnalysisQueue, 20);
+  }, 2000);
+}
+
+// 将杀评分转 cp：从 sideToMove 视角的 mate 分 → mover 视角的 cp，封顶 ±500
+function mateToCp(mateScore, mover, sideToMove) {
+  // mateScore > 0: sideToMove 能杀 → mover 劣势 → cp 负
+  var sign = mateScore > 0 ? -1 : 1;
+  return sign * 500;
+}
+
+function computeQualityScores() {
+  for (var i = 0; i < postGameEvals.length; i++) {
+    var e = postGameEvals[i];
+    if (!e) continue;
+
+    // 走之前 cp（从当前走棋方视角）：前一步 cp 取反
+    var beforeCp = 0;
+    for (var j = i - 1; j >= 0; j--) {
+      if (postGameEvals[j] && postGameEvals[j].cp !== undefined) {
+        beforeCp = -postGameEvals[j].cp;
+        break;
+      }
+    }
+
+    // 绝杀步不算漏着 — 引擎评估终局局面 cp=0，会导致误报
+    var isLastMove = gameOver && i === postGameEvals.length - 1 && i === moveHistory.length - 1;
+    var cpLoss;
+    if (isLastMove) {
+      cpLoss = 0;
+    } else {
+      cpLoss = Math.max(0, beforeCp - e.cp);
+    }
+    e.cpLoss = Math.round(cpLoss);
+    e.score = Math.max(0, Math.min(100, Math.round(100 - cpLoss / 3)));
+    e.isMistake = !isLastMove && cpLoss >= 80;
+    e.isBlunder = !isLastMove && cpLoss >= 150;
+  }
+  renderPostGameChart();
+  renderMoveList();
+  isAnalysisRunning = false;
+  document.getElementById('postgameProgress').textContent = '分析完成 ✓';
+  document.getElementById('btnAnalyze').textContent = '赛后分析';
+}
+
+function renderPostGameChart() {
+  var canvas = document.getElementById('postgameChart');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(0, 0, w, h);
+
+  var evals = [];
+  for (var i = 0; i < postGameEvals.length; i++) {
+    if (postGameEvals[i]) evals.push(postGameEvals[i]);
+  }
+  if (evals.length < 2) {
+    ctx.fillStyle = '#888';
+    ctx.font = '14px serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('走法太少，无法生成趋势图', w / 2, h / 2 + 5);
+    return;
+  }
+
+  var redAdv = [];
+  var minCp = Infinity, maxCp = -Infinity;
+  for (var i = 0; i < evals.length; i++) {
+    var adv = evals[i].side === RED ? evals[i].cp : -evals[i].cp;
+    redAdv.push(adv);
+    if (adv < minCp) minCp = adv;
+    if (adv > maxCp) maxCp = adv;
+  }
+  if (minCp === maxCp) { minCp -= 100; maxCp += 100; }
+  var range = maxCp - minCp || 200;
+  var padding = 30, plotW = w - padding * 2, plotH = h - 24;
+
+  function yForCp(cp) { return 12 + plotH - (cp - minCp) / range * plotH; }
+
+  if (minCp < 0 && maxCp > 0) {
+    var zeroY = yForCp(0);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(padding, zeroY); ctx.lineTo(w - padding, zeroY); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.strokeStyle = '#ef5350';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (var i = 0; i < redAdv.length; i++) {
+    var x = padding + (i / (redAdv.length - 1)) * plotW;
+    var y = yForCp(redAdv[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(Math.round(maxCp) + 'cp', padding + 2, 20);
+  ctx.textAlign = 'left';
+  ctx.fillText(Math.round(minCp) + 'cp', padding + 2, h - 4);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fillText(evals.length + '步', w / 2, h - 4);
+}
+
+function renderMoveList() {
+  var container = document.getElementById('postgameMoveList');
+  if (!container) return;
+  container.innerHTML = '';
+  var moveNum = 1;
+  for (var i = 0; i < postGameEvals.length; i++) {
+    var e = postGameEvals[i];
+    if (!e) continue;
+    var row = document.createElement('div');
+    row.className = 'postgame-move-row';
+    row.dataset.idx = e.moveIdx;
+
+    // RED 方优势
+    var redAdv = e.side === RED ? e.cp : -e.cp;
+    // 前一步 RED 方优势
+    var prevRedAdv = 0;
+    for (var j = i - 1; j >= 0; j--) {
+      if (postGameEvals[j]) {
+        prevRedAdv = postGameEvals[j].side === RED ? postGameEvals[j].cp : -postGameEvals[j].cp;
+        break;
+      }
+    }
+    var delta = redAdv - prevRedAdv;
+    // 从走棋方看的损失幅度
+    if (e.side === RED ? delta <= -150 : delta >= 150) row.classList.add('blunder');
+    else if (e.side === RED ? delta <= -80 : delta >= 80) row.classList.add('mistake');
+
+    // 绝杀步不算漏着
+    var isLastMoveRow = gameOver && i === postGameEvals.length - 1 && i === moveHistory.length - 1;
+    var moverDelta = e.side === RED ? delta : -delta;
+    var qualityBadge;
+    if (isLastMoveRow) {
+      qualityBadge = '优';
+    } else {
+      qualityBadge = moverDelta >= -20 ? '优' : (moverDelta >= -80 ? '缓' : '漏');
+    }
+    var num = Math.floor(moveNum / 2) + 1;
+    var label = e.side === RED ? (num + '. ') : (num + '... ');
+    var evalStr = (redAdv >= 0 ? '+' : '') + (redAdv / 100).toFixed(1);
+    var deltaStr = (delta >= 0 ? '+' : '') + (delta / 100).toFixed(1);
+    row.innerHTML = '<span class="move-label">' + label + '</span>' +
+      '<span class="move-eval">' + evalStr + '</span>' +
+      '<span class="move-delta">Δ' + deltaStr + '</span>' +
+      '<span class="move-quality">' + qualityBadge + '</span>';
+    (function(idx) {
+      row.addEventListener('click', function() { goToAnalysisMove(idx); });
+    })(e.moveIdx);
+    container.appendChild(row);
+    moveNum++;
+  }
+}
+
+function renderPostGameAnalysis() {
+  renderPostGameChart();
+  renderMoveList();
+  goToAnalysisMove(0); // 默认选中第一步
+}
+
+export function startPostGameAnalysis() {
+  if (!gameOver || moveHistory.length === 0 || isAnalysisRunning) return;
+
+  var panel = document.getElementById('postgamePanel');
+  if (!panel) { console.warn('[Analysis] 面板元素未找到'); return; }
+  panel.style.display = 'block';
+  var el = function(id) { return document.getElementById(id); };
+  (el('postgameProgress') || {}).textContent = '加载中...';
+  (el('postgameProgressText') || {}).textContent = '';
+  (el('postgameMoveList') || {}).innerHTML = '';
+  (el('postgameNavInfo') || {}).textContent = '';
+  (el('postgameDetailScore') || {}).textContent = '';
+  (el('postgameDetailSuggestion') || {}).textContent = '';
+  (el('btnAnalyze') || {}).textContent = '停止分析';
+
+  // 检查哪些位置已缓存
+  var missing = [];
+  for (var i = 0; i < moveHistory.length; i++) {
+    if (i >= postGameEvals.length || postGameEvals[i] === undefined) {
+      missing.push(i);
+    }
+  }
+
+  if (missing.length === 0) {
+    (el('postgameProgress') || {}).textContent = '分析完成';
+    computeQualityScores();
+    renderPostGameAnalysis();
+    return;
+  }
+
+  // 补齐缺失位置（通常只有最后几步）
+  isAnalysisRunning = true;
+  (el('postgameProgress') || {}).textContent = '补齐分析... ';
+  (el('postgameProgressText') || {}).textContent = '0/' + missing.length;
+
+  initEngine().then(function() {
+    fillMissingAnalyses(missing, 0, function() {
+      isAnalysisRunning = false;
+      (el('postgameProgress') || {}).textContent = '分析完成 ✓';
+      (el('btnAnalyze') || {}).textContent = '赛后分析';
+      computeQualityScores();
+      renderPostGameAnalysis();
+    });
+  }).catch(function() {
+    isAnalysisRunning = false;
+    (el('postgameProgress') || {}).textContent = '引擎加载失败';
+    (el('btnAnalyze') || {}).textContent = '赛后分析';
+  });
+}
+
+function fillMissingAnalyses(missing, idx, onDone) {
+  if (idx >= missing.length) { if (onDone) onDone(); return; }
+  var mi = missing[idx];
+  var el = function(id) { return document.getElementById(id); };
+  (el('postgameProgressText') || {}).textContent = (idx + 1) + '/' + missing.length;
+
+  var state = reconstructBoardState(mi);
+  var mover = moveHistory[mi].piece.color;
+  var sideToMove = opponent(mover);
+
+  analyzePosition(state.board, sideToMove, null, function(result) {
+    if (result) {
+      var cp = result.scoreType === 'cp' ? -(result.score) : mateToCp(result.score, mover, sideToMove);
+      postGameEvals[mi] = {
+        moveIdx: mi,
+        side: mover,
+        cp: cp,
+        depth: result.depth || 0,
+        pv: result.pv || '',
+        score: 0,
+        scoreType: result.scoreType,
+        rawScore: result.score
+      };
+    } else {
+      postGameEvals[mi] = null;
+    }
+    setTimeout(function() { fillMissingAnalyses(missing, idx + 1, onDone); }, 20);
+  }, 3000);
+}
+
+export function goToAnalysisMove(idx) {
+  if (isAnalysisRunning && idx >= postGameEvals.length) return;
+  if (isAnalysisRunning && postGameEvals[idx] === undefined) return;
+  if (idx < -1 || idx >= moveHistory.length) return;
+
+  analysisMoveIndex = idx;
+  isPostGameAnalysis = idx >= 0;
+
+  var rows = document.querySelectorAll('#postgameMoveList .postgame-move-row');
+  for (var i = 0; i < rows.length; i++) {
+    rows[i].classList.toggle('active', parseInt(rows[i].dataset.idx) === idx);
+  }
+
+  var navInfo = document.getElementById('postgameNavInfo');
+  var detailScore = document.getElementById('postgameDetailScore');
+  var detailSug = document.getElementById('postgameDetailSuggestion');
+
+  if (idx === -1) {
+    analysisHint = null;
+    navInfo.textContent = '最终局面';
+    detailScore.textContent = '';
+    detailSug.textContent = '点击走法查看分析';
+  } else {
+    var e = postGameEvals[idx];
+    if (e) {
+      var redAdv = e.side === RED ? e.cp : -e.cp;
+      var prevRedAdv = 0;
+      for (var j = idx - 1; j >= 0; j--) {
+        if (postGameEvals[j]) {
+          prevRedAdv = postGameEvals[j].side === RED ? postGameEvals[j].cp : -postGameEvals[j].cp;
+          break;
+        }
+      }
+      var delta = redAdv - prevRedAdv;
+      var num = Math.floor((idx + 2) / 2);
+      var sideLabel = e.side === RED ? '红方' : '黑方';
+      var advLabel = redAdv >= 0 ? '红方+' + (redAdv/100).toFixed(1) : '黑方+' + (-redAdv/100).toFixed(1);
+      // 大势判断
+      var advText = redAdv > 50 ? '红方优势' : (redAdv < -50 ? '黑方优势' : '均势');
+      // 走棋质量（从走棋方视角）
+      var moverDelta = e.side === RED ? delta : -delta;
+      var quality = moverDelta >= -20 ? '优招' : (moverDelta >= -80 ? '缓招' : '漏招');
+      navInfo.textContent = '第' + (idx + 1) + '步 (' + sideLabel + ') ' + advText + ' ' + quality;
+      detailScore.textContent = advLabel + ' | 变化' + (delta >= 0 ? '+' : '') + (delta/100).toFixed(1);
+      // 在棋盘上标出 AI 推荐走法
+      if (e.pv) {
+        var pvMoves = e.pv.split(' ');
+        detailSug.textContent = 'AI推荐: ' + pvMoves.slice(0, 3).join(' → ');
+        var hint = uciToMove(pvMoves[0]);
+        analysisHint = { fromR: hint.fromR, fromC: hint.fromC, toR: hint.toR, toC: hint.toC };
+      } else {
+        analysisHint = null;
+        detailSug.textContent = '';
+      }
+    } else {
+      analysisHint = null;
+      navInfo.textContent = '第' + (idx + 1) + '步';
+      detailScore.textContent = '分析不可用';
+      detailSug.textContent = '';
+    }
+  }
+
+  render();
+}
+
+export function goToAnalysisPrev() {
+  var next = analysisMoveIndex - 1;
+  if (next < -1) next = -1;
+  goToAnalysisMove(next);
+}
+
+export function goToAnalysisNext() {
+  var next = analysisMoveIndex + 1;
+  if (next >= moveHistory.length) next = moveHistory.length - 1;
+  goToAnalysisMove(next);
+}
+
+export function closePostGameAnalysis() {
+  document.getElementById('postgamePanel').style.display = 'none';
+  document.getElementById('btnAnalyze').textContent = '赛后分析';
+  isPostGameAnalysis = false;
+  analysisMoveIndex = -1;
+  stopEngine();
+  render();
+}
+
+// ============ 悔棋（人机模式撤回两步） ============
+export function undoMove() {
+  if (gameOver || aiThinking || gameMode === 'online') return;
+  var steps = (gameMode === 'ai') ? 2 : 1;
+  for (var i = 0; i < steps && moveHistory.length > 0; i++) {
+    doUndoOne();
+  }
+}
+
+function doUndoOne() {
+  if (moveHistory.length === 0) return;
+  var last = moveHistory.pop();
+  board[last.fromR][last.fromC] = last.piece;
+  board[last.toR][last.toC] = last.captured;
+  if (last.captured) { var arr = capturedPieces[last.captured.color]; arr.pop(); }
+  currentTurn = last.piece.color;
+  inCheck = isInCheck(currentTurn, board);
+  document.getElementById('checkWarning').innerHTML = inCheck ? '<span class="check-icon"></span>将军！' : '';
+  gameOver = false;
+  document.getElementById('message').style.display = 'none';
+  selectedPos = null; legalMoves = [];
+  updateTurnIndicator(); render();
+}
+
+// ============ 自定义残局编辑器 ============
+
+function enterEditor() {
+  isEditing = true;
+  board = [];
+  for (var r = 0; r < ROWS; r++) { board[r] = []; for (var c = 0; c < COLS; c++) board[r][c] = null; }
+  currentTurn = RED;
+  selectedPos = null; legalMoves = []; moveHistory = [];
+  capturedPieces = { [RED]: [], [BLACK]: [] };
+  gameOver = false; inCheck = false; aiThinking = false;
+  document.getElementById('checkWarning').innerHTML = '';
+  document.getElementById('message').style.display = 'none';
+  var vm = document.getElementById('victoryMessage'); vm.classList.remove('show'); vm.textContent = '';
+  var overlay = document.getElementById('effectOverlay'); if (overlay) overlay.innerHTML = '';
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  redTimeRemaining = gameSettings.totalTime ? gameSettings.totalTime * 1000 : null;
+  blackTimeRemaining = gameSettings.totalTime ? gameSettings.totalTime * 1000 : null;
+  moveStartTime = null; lastTotalTimeSample = null;
+  updateTimerDisplay();
+  document.getElementById('turnIndicator').textContent = '编辑残局';
+  document.getElementById('turnIndicator').className = 'turn-indicator editor';
+  document.getElementById('editorPanel').style.display = 'flex';
+  var infoEl = document.querySelector('.info-panel'); if (infoEl) infoEl.style.display = 'none';
+  document.getElementById('timerRow').style.display = 'none';
+  document.getElementById('controls').style.display = 'none';
+  var modeEl = document.querySelector('.mode-selector'); if (modeEl) modeEl.style.display = 'none';
+  document.getElementById('aiStatus').textContent = '';
+  document.getElementById('redTimer').style.display = 'none';
+  document.getElementById('blackTimer').style.display = 'none';
+  editorPiece = { type: PIECE.GENERAL, color: RED };
+  updateEditorPalette();
+  render();
+}
+
+export function editSelectPiece(type, color) {
+  if (type === 'eraser') { editorPiece = null; }
+  else { editorPiece = { type: editorTypeToNum(type), color: color === 'red' ? RED : BLACK }; }
+  updateEditorPalette();
+}
+
+function editorTypeToNum(t) {
+  var map = { general: PIECE.GENERAL, advisor: PIECE.ADVISOR, elephant: PIECE.ELEPHANT,
+              horse: PIECE.HORSE, rook: PIECE.ROOK, cannon: PIECE.CANNON, pawn: PIECE.PAWN };
+  return map[t] || PIECE.GENERAL;
+}
+
+function updateEditorPalette() {
+  var btns = document.querySelectorAll('#editorPalette .editor-piece-btn');
+  btns.forEach(function(b) {
+    b.classList.remove('selected');
+    if (!editorPiece && b.dataset.type === 'eraser') { b.classList.add('selected'); }
+    else if (editorPiece && b.dataset.type !== 'eraser') {
+      var c = b.dataset.color === 'red' ? RED : BLACK;
+      var t = editorTypeToNum(b.dataset.type);
+      if (c === editorPiece.color && t === editorPiece.type) { b.classList.add('selected'); }
+    }
+  });
+}
+
+export function editPlacePiece(row, col) {
+  if (!isEditing) return;
+  if (editorPiece && editorPiece.type === PIECE.GENERAL) {
+    var ok = false;
+    if (editorPiece.color === RED && row >= 7 && row <= 9 && col >= 3 && col <= 5) ok = true;
+    if (editorPiece.color === BLACK && row >= 0 && row <= 2 && col >= 3 && col <= 5) ok = true;
+    if (!ok) return;
+  }
+  if (editorPiece) { board[row][col] = createPiece(editorPiece.type, editorPiece.color); }
+  else { board[row][col] = null; }
+  render();
+}
+
+export function clearEditBoard() {
+  if (!isEditing) return;
+  for (var r = 0; r < ROWS; r++) for (var c = 0; c < COLS; c++) board[r][c] = null;
+  render();
+}
+
+export function confirmCustomGame() {
+  if (!isEditing) return;
+  // 验证：双方各至少有一个将/帅
+  var hasRedGen = false, hasBlackGen = false;
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      var p = board[r][c];
+      if (!p) continue;
+      if (p.type === PIECE.GENERAL && p.color === RED) hasRedGen = true;
+      if (p.type === PIECE.GENERAL && p.color === BLACK) hasBlackGen = true;
+    }
+  }
+  if (!hasRedGen || !hasBlackGen) {
+    alert('双方都必须有将/帅才能开始对弈！');
+    return;
+  }
+
+  isEditing = false;
+  gameMode = 'pvp'; // 残局默认双人对弈
+  document.querySelectorAll('.mode-btn').forEach(function(b) { b.classList.toggle('active', b.dataset.mode === 'pvp'); });
+  currentTurn = gameSettings.aiColor === 'red' ? RED : BLACK;
+  inCheck = isInCheck(currentTurn, board);
+  gameOver = false;
+  selectedPos = null; legalMoves = [];
+  moveHistory = [];
+  capturedPieces = { [RED]: [], [BLACK]: [] };
+  aiThinking = false;
+  document.getElementById('checkWarning').innerHTML = '';
+  document.getElementById('message').style.display = 'none';
+  var vm = document.getElementById('victoryMessage'); vm.classList.remove('show'); vm.textContent = '';
+  var overlay = document.getElementById('effectOverlay'); if (overlay) overlay.innerHTML = '';
+
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  redTimeRemaining = gameSettings.totalTime ? gameSettings.totalTime * 1000 : null;
+  blackTimeRemaining = gameSettings.totalTime ? gameSettings.totalTime * 1000 : null;
+  moveStartTime = null; lastTotalTimeSample = null;
+  updateTimerDisplay();
+  startTimer();
+
+  document.getElementById('editorPanel').style.display = 'none';
+  var infoEl = document.querySelector('.info-panel'); if (infoEl) infoEl.style.display = '';
+  document.getElementById('timerRow').style.display = '';
+  document.getElementById('controls').style.display = '';
+  var modeEl = document.querySelector('.mode-selector'); if (modeEl) modeEl.style.display = '';
+  document.getElementById('redTimer').style.display = '';
+  document.getElementById('blackTimer').style.display = '';
+  updateTurnIndicator();
+  render();
+}
+
+// ============ 联机对战回调注册 ============
+
+function setupOnlineCallbacks() {
+  onRoomCreated(async function(sdp) {
+    // guard: SDP 过短说明 localDescription 可能为空
+    if (!sdp || sdp.length < 20) {
+      console.error('[roomCreated] SDP无效, 长度=' + (sdp ? sdp.length : 0));
+      if (_callbacks.error) _callbacks.error('SDP生成失败，请重试');
+      return;
+    }
+    onlineColor = getMyColor() === 'red' ? RED : BLACK;
+    var el = document.getElementById('sdpOutputText');
+    var compressed = await compressSDP(sdp);
+    if (el) el.value = compressed;
+    document.getElementById('sdpOutput').style.display = 'flex';
+    document.getElementById('sdpInput').style.display = onlineColor === RED ? 'flex' : 'none';
+    document.getElementById('sdpPanel').style.display = 'flex';
+    if (window._onQRUpdateSDP) window._onQRUpdateSDP(sdp);
+    if (onlineColor === RED) {
+      document.getElementById('sdpHint').textContent = '①复制连接码发给对手 ②将对手回复的码粘贴到下方 ③点确认';
+      document.getElementById('sdpRoleLabel').textContent = '红方（先手）';
+    } else {
+      document.getElementById('sdpHint').textContent = '①复制连接码发给对手 ②等待连接...';
+      document.getElementById('sdpRoleLabel').textContent = '黑方（后手）';
+    }
+  });
+
+  onGameStart(function(data) {
+    onlineColor = data.color === 'red' ? RED : BLACK;
+    onlineReady = true;
+    document.getElementById('onlinePanel').style.display = 'none';
+    document.getElementById('onlineStatusBar').style.display = 'flex';
+    document.getElementById('onlineBarColor').textContent = onlineColor === RED ? '红' : '黑';
+    newGame();
+    var text = onlineColor === RED ? '游戏开始，你执红先手' : '游戏开始，你执黑后手';
+    showMessage(text);
+    setTimeout(function() { document.getElementById('message').style.display = 'none'; }, 2000);
+  });
+
+  onOpponentMove(function(move) {
+    if (gameOver || !onlineReady) return;
+    makeMove(move.fromR, move.fromC, move.toR, move.toC);
+  });
+
+  onOpponentResigned(function() {
+    if (gameOver) return;
+    gameOver = true;
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    var winner = onlineColor === RED ? '红方' : '黑方';
+    showVictoryMessage('对手认输！' + winner + '获胜');
+    updateTurnIndicator();
+    render();
+  });
+
+  onOpponentDisconnected(function() {
+    if (gameOver) return;
+    onlineReady = false;
+    showMessage('对手断开连接');
+    gameOver = true;
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    updateTurnIndicator();
+    render();
+  });
+
+  onIceFailed(function() {
+    if (gameOver) return;
+    showMessage('P2P连接失败：无法到达对方设备。请确保双方在同一WiFi/热点网络下');
+    onlineReady = false;
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    updateTurnIndicator();
+    render();
+  });
+
+  onError(function(msg) {
+    var el = document.getElementById('sdpError');
+    if (el) { el.textContent = msg; el.style.display = 'block'; }
+  });
+}
+
+// ============ 联机对战公开 API（SDP 粘贴模式）============
+
+export function hostOnlineSession() {
+  hostSession(null);
+}
+
+export async function acceptOnlineOffer(sdp) {
+  var norm = await normalizeSDP(sdp);
+  acceptOffer(norm, null);
+}
+
+export async function joinOnlineSession(sdp) {
+  var norm = await normalizeSDP(sdp);
+  connectGuest(norm);
+}
+
+export function resignOnline() {
+  if (gameOver || !onlineReady) return;
+  sendResign();
+  gameOver = true;
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  var loser = onlineColor === RED ? '红方' : '黑方';
+  var winner = onlineColor === RED ? '黑方' : '红方';
+  showVictoryMessage(loser + '认输！' + winner + '获胜');
+  updateTurnIndicator();
+  render();
+}
+
+export function leaveOnlineRoom() {
+  disconnect();
+  onlineReady = false;
+  onlineColor = null;
+  document.getElementById('onlinePanel').style.display = 'flex';
+  document.getElementById('onlineStatusBar').style.display = 'none';
+  document.getElementById('sdpPanel').style.display = 'flex';
+  document.getElementById('sdpOutput').style.display = 'none';
+  document.getElementById('sdpInput').style.display = 'none';
+  document.getElementById('sdpError').style.display = 'none';
+  newGame();
+}
+
+export function getOnlineReady() { return onlineReady; }
+export function getOnlineColor() { return onlineColor; }
+
+// ============ UI 辅助 ============
+function showMessage(msg) {
+  var el = document.getElementById('message');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+function showVictoryMessage(msg) {
+  var el = document.getElementById('victoryMessage');
+  el.textContent = msg;
+  el.classList.remove('show');
+  setTimeout(function() { el.classList.add('show'); }, 50);
+}
+
+function updateTurnIndicator() {
+  var el = document.getElementById('turnIndicator');
+  var turn = currentTurn;
+  if (isPostGameAnalysis) {
+    var state = reconstructBoardState(analysisMoveIndex);
+    turn = state.currentTurn;
+  }
+  var color = turn === RED ? 'red' : 'black';
+  var text = turn === RED ? '红方走棋' : '黑方走棋';
+  if (isPostGameAnalysis) text = '复盘: ' + text;
+  else if (aiThinking) text += ' (AI思考中...)';
+  el.textContent = text;
+  el.className = 'turn-indicator ' + color;
+}
+
+// ============ 渲染 ============
+function render() {
+  // 赛后分析模式：重建历史局面
+  var renderBoard = board;
+  var renderTurn = currentTurn;
+  var renderLastMove = moveHistory.length > 0 ? moveHistory[moveHistory.length - 1] : null;
+  var renderInCheck = inCheck;
+  if (isPostGameAnalysis) {
+    var state = reconstructBoardState(analysisMoveIndex);
+    renderBoard = state.board;
+    renderTurn = state.currentTurn;
+    renderLastMove = analysisMoveIndex >= 0 && analysisMoveIndex < moveHistory.length ? moveHistory[analysisMoveIndex] : null;
+    renderInCheck = isInCheck(renderTurn, renderBoard);
+  }
+
+  var boardEl = document.getElementById('board');
+  var cells = boardEl.querySelectorAll('.cell');
+  for (var i = 0; i < cells.length; i++) cells[i].remove();
+
+  for (var row = 0; row < ROWS; row++) {
+    for (var col = 0; col < COLS; col++) {
+      var cell = document.createElement('div');
+      cell.className = 'cell' + (isEditing ? ' editing' : '');
+      cell.dataset.row = row;
+      cell.dataset.col = col;
+
+      if (renderLastMove && ((row === renderLastMove.fromR && col === renderLastMove.fromC) || (row === renderLastMove.toR && col === renderLastMove.toC)))
+        cell.classList.add('last-move');
+
+      var piece = renderBoard[row][col];
+      if (piece) {
+        var pieceEl = document.createElement('div');
+        pieceEl.className = 'piece ' + (piece.color === RED ? 'red' : 'black');
+        pieceEl.textContent = PIECE_NAMES[piece.color][piece.type];
+        if (selectedPos && row === selectedPos.row && col === selectedPos.col)
+          pieceEl.classList.add('selected');
+        // 将军高亮：对当前走棋方被将军的将/帅加红色脉冲
+        if (renderInCheck && piece.type === PIECE.GENERAL && piece.color === renderTurn)
+          pieceEl.classList.add('in-check');
+        // 绝杀高亮（复盘时只在最终局面显示）
+        if (gameOver && piece.type === PIECE.GENERAL && piece.color === renderTurn &&
+            (!isPostGameAnalysis || analysisMoveIndex >= moveHistory.length - 1))
+          pieceEl.classList.add('checkmated');
+        // AI 分析：标记推荐走法的起点棋子
+        if (analysisHint && row === analysisHint.fromR && col === analysisHint.fromC) {
+          pieceEl.classList.add('analysis-from');
+        }
+        (function (r, c) {
+          pieceEl.addEventListener('click', function (e) { e.stopPropagation(); onPieceClick(r, c); });
+        })(row, col);
+        cell.appendChild(pieceEl);
+      }
+
+      // 合法走法标记
+      for (var j = 0; j < legalMoves.length; j++) {
+        if (legalMoves[j].row === row && legalMoves[j].col === col) {
+          if (board[row][col]) {
+            var cap = document.createElement('div');
+            cap.className = 'legal-capture'; cell.appendChild(cap);
+          } else {
+            var dot = document.createElement('div');
+            dot.className = 'legal-move'; cell.appendChild(dot);
+          }
+          cell.style.cursor = 'pointer';
+        }
+      }
+
+      // AI 分析：标记推荐走法的目标位置
+      if (analysisHint && row === analysisHint.toR && col === analysisHint.toC) {
+        var hintDot = document.createElement('div');
+        hintDot.className = 'analysis-to';
+        cell.appendChild(hintDot);
+      }
+
+      (function (r, c) {
+        cell.addEventListener('click', function () { onCellClick(r, c); });
+      })(row, col);
+      boardEl.appendChild(cell);
+    }
+  }
+
+  if (isPostGameAnalysis && analysisMoveIndex >= 0) {
+    // 统计截至当前步的失子
+    var capRed = [], capBlack = [];
+    for (var ci = 0; ci <= analysisMoveIndex && ci < moveHistory.length; ci++) {
+      var cap = moveHistory[ci].captured;
+      if (cap) {
+        if (cap.color === RED) capRed.push(cap);
+        else capBlack.push(cap);
+      }
+    }
+    document.getElementById('capturedBlack').innerHTML = '黑方失子：' +
+      capBlack.map(function (p) { return PIECE_NAMES[RED][p.type]; }).join(' ');
+    document.getElementById('capturedRed').innerHTML = '红方失子：' +
+      capRed.map(function (p) { return PIECE_NAMES[BLACK][p.type]; }).join(' ');
+  } else {
+    document.getElementById('capturedBlack').innerHTML = '黑方失子：' +
+      capturedPieces[BLACK].map(function (p) { return PIECE_NAMES[RED][p.type]; }).join(' ');
+    document.getElementById('capturedRed').innerHTML = '红方失子：' +
+      capturedPieces[RED].map(function (p) { return PIECE_NAMES[BLACK][p.type]; }).join(' ');
+  }
+
+  drawBoardLines();
+  updateButtonStates();
+}
+
+function updateButtonStates() {
+  var btnUndo = document.getElementById('btnUndo');
+  btnUndo.disabled = gameOver || aiThinking || moveHistory.length === 0;
+}
+
+// ============ Canvas 棋盘线条绘制 ============
+function drawBoardLines() {
+  var boardEl = document.getElementById('board');
+  var canvas = boardEl.querySelector('canvas');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+    boardEl.appendChild(canvas);
+  }
+  var rect = boardEl.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  var ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  var w = rect.width, h = rect.height;
+  var cellW = w / 9, cellH = h / 10;
+  var ox = cellW / 2, oy = cellH / 2;
+
+  var theme = THEMES[currentTheme] || THEMES.classic;
+  ctx.clearRect(0, 0, w, h);
+
+    // 底色
+  ctx.fillStyle = theme.boardBg;
+  ctx.fillRect(0, 0, w, h);
+
+  // 光照
+  var lightGrad = ctx.createRadialGradient(w * 0.45, h * 0.45, w * 0.05, w * 0.5, h * 0.5, w * 0.8);
+  lightGrad.addColorStop(0, 'rgba(255,255,240,0.06)');
+  lightGrad.addColorStop(0.4, 'rgba(255,255,240,0.02)');
+  lightGrad.addColorStop(1, 'rgba(0,0,0,0.15)');
+  ctx.fillStyle = lightGrad;
+  ctx.fillRect(0, 0, w, h);
+
+  // 外框
+  ctx.strokeStyle = theme.boardLine;
+  ctx.lineWidth = w * 0.018;
+  ctx.globalAlpha = 0.9;
+  ctx.strokeRect(ox, oy, w - cellW, h - cellH);
+
+  // 格线
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.55;
+  for (var r = 0; r < 10; r++) {
+    var y = oy + r * cellH;
+    ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(w - ox, y); ctx.stroke();
+  }
+  for (var c = 0; c < 9; c++) {
+    var x = ox + c * cellW;
+    if (c === 0 || c === 8) {
+      ctx.beginPath(); ctx.moveTo(x, oy); ctx.lineTo(x, oy + 9 * cellH); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.moveTo(x, oy); ctx.lineTo(x, oy + 4 * cellH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, oy + 5 * cellH); ctx.lineTo(x, oy + 9 * cellH); ctx.stroke();
+    }
+  }
+
+  // 九宫格对角线
+  ctx.lineWidth = 1.1;
+  function drawPalace(topR) {
+    var y1 = oy + topR * cellH, y2 = oy + (topR + 2) * cellH;
+    var x1 = ox + 3 * cellW, x2 = ox + 5 * cellW;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x2, y1); ctx.lineTo(x1, y2); ctx.stroke();
+  }
+  drawPalace(0);
+  drawPalace(7);
+  ctx.globalAlpha = 1;
+}

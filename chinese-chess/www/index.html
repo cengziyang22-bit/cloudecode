@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+<title>中國象棋</title>
+<link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==">
+<link rel="stylesheet" href="css/style.css">
+<!-- COI: enable SharedArrayBuffer for Fairy-Stockfish WASM -->
+<script>(function(){
+if(!('serviceWorker'in navigator)){console.log('[COI] SW not supported');return}
+if(window.crossOriginIsolated){console.log('[COI] already isolated');return}
+if(location.protocol==='file:'){console.log('[COI] file:// skip');return}
+console.log('[COI] registering SW...');
+var reloaded=false;
+function onActive(){if(!reloaded){reloaded=true;console.log('[COI] SW active, reloading...');window.location.reload()}}
+navigator.serviceWorker.register('coi-serviceworker.js').then(function(reg){
+  console.log('[COI] SW registered, state:', reg.active?'active':reg.installing?'installing':reg.waiting?'waiting':'unknown');
+  if(reg.active){onActive();return}
+  if(reg.installing){reg.installing.addEventListener('statechange',function(){
+    console.log('[COI] SW state:',this.state);
+    if(this.state==='activated')onActive()
+  })}
+  if(reg.waiting){reg.waiting.postMessage({type:'SKIP_WAITING'});onActive()}
+  reg.addEventListener('updatefound',function(){
+    var sw=reg.installing||reg.waiting;
+    if(sw){sw.addEventListener('statechange',function(){
+      console.log('[COI] SW state:',this.state);
+      if(this.state==='activated')onActive()
+    })}
+  })
+}).catch(function(e){console.warn('[COI] SW registration failed:',e.message)})
+})()</script>
+</head>
+<body>
+
+<!-- 开始界面 -->
+<div class="start-screen" id="startScreen">
+  <div class="start-bg-pattern"></div>
+  <div class="start-content">
+    <div class="start-icon">帅</div>
+    <div class="start-title">中国象棋</div>
+    <div class="start-subtitle">Chinese Chess</div>
+    <div class="start-modes">
+      <button class="start-mode-btn selected" data-mode="pvp">
+        <span class="mode-icon icon-pvp">炮</span>
+        <span class="mode-label">双人对弈</span>
+        <span class="mode-desc">两位玩家在同一设备上对弈</span>
+      </button>
+      <button class="start-mode-btn" data-mode="ai">
+        <span class="mode-icon icon-red">車</span>
+        <span class="mode-label">人机对战</span>
+        <span class="mode-desc">与AI对弈，可在设置中选择执红或执黑</span>
+      </button>
+      <button class="start-mode-btn" data-mode="online">
+        <span class="mode-icon icon-online">仕</span>
+        <span class="mode-label">联机对战</span>
+        <span class="mode-desc">通过房间号与朋友远程对弈</span>
+      </button>
+      <button class="start-mode-btn" data-mode="custom">
+        <span class="mode-icon icon-custom">局</span>
+        <span class="mode-label">自定义残局</span>
+        <span class="mode-desc">自由摆放棋子，创建专属残局</span>
+      </button>
+    </div>
+    <button class="start-game-btn" id="btnStartGame">开始游戏</button>
+  </div>
+  <!-- 设置面板 -->
+  <div class="settings-panel" id="settingsPanel" style="display:none">
+    <div class="settings-content">
+      <div class="settings-back" id="btnSettingsBack">&larr; 返回</div>
+      <div class="settings-title">游戏设置</div>
+      <div class="settings-group">
+        <div class="settings-label">总时间</div>
+        <div class="settings-options" data-key="totalTime">
+          <button class="settings-option selected" data-value="unlimited">无限制</button>
+          <button class="settings-option" data-value="300">5分钟</button>
+          <button class="settings-option" data-value="600">10分钟</button>
+          <button class="settings-option" data-value="1200">20分钟</button>
+          <button class="settings-option" data-value="1800">30分钟</button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-label">每步限时</div>
+        <div class="settings-options" data-key="moveTime">
+          <button class="settings-option selected" data-value="unlimited">无限制</button>
+          <button class="settings-option" data-value="30">30秒</button>
+          <button class="settings-option" data-value="60">1分钟</button>
+          <button class="settings-option" data-value="120">2分钟</button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-label">棋盘皮肤</div>
+        <div class="skin-options">
+          <button class="skin-swatch selected" data-theme="classic" title="经典木纹" style="background:linear-gradient(135deg,#e6c878 50%,#c8944a 50%)"></button>
+          <button class="skin-swatch" data-theme="rosewood" title="红木" style="background:linear-gradient(135deg,#d4a060 50%,#4a1a0a 50%)"></button>
+          <button class="skin-swatch" data-theme="porcelain" title="青花瓷" style="background:linear-gradient(135deg,#f8f4ec 50%,#c8c0b0 50%)"></button>
+          <button class="skin-swatch" data-theme="ink" title="水墨" style="background:linear-gradient(135deg,#f2edde 50%,#d5cdb8 50%)"></button>
+        </div>
+      </div>
+      <div class="settings-group" id="difficultyGroup" style="display:none">
+        <div class="settings-label">AI难度 <span class="diff-val" id="diffLabel">10</span></div>
+        <input type="range" class="diff-slider" id="diffSlider" min="1" max="10" value="10">
+        <div class="diff-range-labels"><span>1 简单</span><span>10 最难</span></div>
+      </div>
+      <div class="settings-group" id="colorGroup" style="display:none">
+        <div class="settings-label">执子颜色</div>
+        <div class="settings-options" data-key="aiColor">
+          <button class="settings-option selected" data-value="red">执红（先手）</button>
+          <button class="settings-option" data-value="black">执黑（后手）</button>
+        </div>
+      </div>
+      <button class="settings-confirm-btn" id="btnConfirmSettings">确认开始</button>
+    </div>
+  </div>
+</div>
+
+<div class="container" id="gameContainer" style="display:none">
+  <div class="header">中国象棋</div>
+
+  <!-- 模式选择 -->
+  <div class="mode-selector">
+    <button class="mode-btn active" data-mode="pvp" id="btnPvP">双人对弈</button>
+    <button class="mode-btn" data-mode="ai" id="btnAI">人机对战</button>
+    <button class="mode-btn" data-mode="online" id="btnOnline">联机对战</button>
+    <button class="mode-btn" data-mode="custom" id="btnCustom">自定义残局</button>
+  </div>
+
+  <div class="turn-indicator red" id="turnIndicator">红方走棋</div>
+  <div class="ai-status" id="aiStatus"></div>
+
+  <div class="timer-row" id="timerRow">
+    <div class="timer-display" id="redTimer">
+      <span class="timer-dot red-dot"></span>
+      <span class="timer-label">红方</span>
+      <span class="timer-time" id="redTimerTime">--:--</span>
+      <span class="move-time" id="redMoveTime"></span>
+    </div>
+    <span class="timer-vs">VS</span>
+    <div class="timer-display" id="blackTimer">
+      <span class="timer-dot"></span>
+      <span class="timer-label">黑方</span>
+      <span class="timer-time" id="blackTimerTime">--:--</span>
+      <span class="move-time" id="blackMoveTime"></span>
+    </div>
+  </div>
+
+  <!-- 联机对战面板（SDP 直连模式） -->
+  <div class="online-panel" id="onlinePanel" style="display:none">
+    <div class="online-section">
+      <span class="online-role" id="sdpRoleLabel">选择身份</span>
+
+      <!-- SDP 粘贴面板 -->
+      <div class="sdp-panel" id="sdpPanel">
+        <button class="btn online-btn-host" id="btnHostSession">创建连接（红方先手）</button>
+        <div class="sdp-divider"><span>或</span></div>
+        <div class="sdp-join-row">
+          <input type="text" class="online-input-url" id="sdpPasteInput" placeholder="粘贴对手的连接码" autocomplete="off">
+          <button class="btn qr-scan-icon-btn" id="btnScanHostSDP" title="摄像头扫码">📷</button>
+          <button class="btn qr-scan-icon-btn" id="btnScanHostSDPFile" title="从图片扫码">🖼️</button>
+          <button class="btn color-decode-btn" id="btnDecodeColorImage" title="从色块图解码">🎨</button>
+          <button class="btn online-btn-join" id="btnAcceptOffer">加入连接</button>
+        </div>
+
+        <!-- SDP 输出（显示生成的连接码 + 二维码） -->
+        <div class="sdp-output" id="sdpOutput" style="display:none">
+          <div class="sdp-label">连接码（发给对手）</div>
+          <textarea class="sdp-textarea" id="sdpOutputText" readonly rows="1"></textarea>
+          <button class="btn sdp-copy-btn" id="btnCopySdp">复制连接码</button>
+          <button class="btn sdp-color-btn" id="btnSaveColorImage">🎨 生成色块图</button>
+          <div class="color-preview" id="colorPreview" style="display:none">
+            <img class="color-preview-img" id="colorPreviewImg">
+            <div class="color-preview-hint">长按图片保存 · 发给对方</div>
+          </div>
+          <!-- 二维码预览 -->
+          <div class="qr-preview" id="sdpQRPreview">
+            <div class="qr-preview-code" id="sdpQRCode" title="点击放大"></div>
+            <div class="color-preview" id="qrColorPreview" style="display:none">
+              <img class="color-preview-img" id="qrColorPreviewImg">
+              <div class="color-preview-hint">色块图（截图发给对方）</div>
+            </div>
+            <div class="qr-preview-hint">扫对方二维码&nbsp;·&nbsp;发送时勾选「原图」</div>
+          </div>
+        </div>
+
+        <!-- 粘贴对手回复 -->
+        <div class="sdp-input" id="sdpInput" style="display:none">
+          <div class="sdp-label">粘贴对手回复的连接码</div>
+          <div class="sdp-join-row">
+            <textarea class="sdp-textarea" id="sdpPasteAnswer" placeholder="将对手回复的连接码粘贴到这里" rows="2"></textarea>
+            <button class="btn qr-scan-icon-btn qr-scan-icon-btn-abs" id="btnScanAnswerSDP" title="摄像头扫码">📷</button>
+            <button class="btn qr-scan-icon-btn qr-scan-icon-btn-abs-file" id="btnScanAnswerSDPFile" title="从图片扫码">🖼️</button>
+            <button class="btn color-decode-btn" id="btnDecodeAnswerImage" title="从色块图解码">🎨</button>
+          </div>
+          <button class="btn sdp-confirm-btn" id="btnConfirmAnswer">确认</button>
+          <div class="color-preview" id="answerColorPreview" style="display:none">
+            <img class="color-preview-img" id="answerColorPreviewImg">
+            <div class="color-preview-hint">应答色块图 · 长按保存发给主机</div>
+          </div>
+        </div>
+
+        <div class="sdp-hint" id="sdpHint"></div>
+        <div class="sdp-error" id="sdpError" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 联机状态栏（游戏中显示） -->
+  <div class="online-statusbar" id="onlineStatusBar" style="display:none">
+    <span>执<span id="onlineBarColor">--</span></span>
+    <button class="btn online-resign-btn" id="btnOnlineResign">认输</button>
+  </div>
+
+  <div class="info-panel">
+    <div class="captured black" id="capturedBlack">黑方失子：</div>
+    <div class="captured red" id="capturedRed">红方失子：</div>
+  </div>
+  <!-- 自定义残局编辑器 -->
+  <div class="editor-panel" id="editorPanel" style="display:none">
+    <div class="editor-label">棋子选择</div>
+    <div class="editor-palette" id="editorPalette">
+      <button class="editor-piece-btn red-piece selected" data-type="general" data-color="red" title="帅">帅</button>
+      <button class="editor-piece-btn red-piece" data-type="advisor" data-color="red" title="仕">仕</button>
+      <button class="editor-piece-btn red-piece" data-type="elephant" data-color="red" title="相">相</button>
+      <button class="editor-piece-btn red-piece" data-type="horse" data-color="red" title="馬">馬</button>
+      <button class="editor-piece-btn red-piece" data-type="rook" data-color="red" title="車">車</button>
+      <button class="editor-piece-btn red-piece" data-type="cannon" data-color="red" title="炮">炮</button>
+      <button class="editor-piece-btn red-piece" data-type="pawn" data-color="red" title="兵">兵</button>
+      <span class="editor-gap"></span>
+      <button class="editor-piece-btn black-piece" data-type="general" data-color="black" title="将">将</button>
+      <button class="editor-piece-btn black-piece" data-type="advisor" data-color="black" title="士">士</button>
+      <button class="editor-piece-btn black-piece" data-type="elephant" data-color="black" title="象">象</button>
+      <button class="editor-piece-btn black-piece" data-type="horse" data-color="black" title="馬">馬</button>
+      <button class="editor-piece-btn black-piece" data-type="rook" data-color="black" title="車">車</button>
+      <button class="editor-piece-btn black-piece" data-type="cannon" data-color="black" title="炮">炮</button>
+      <button class="editor-piece-btn black-piece" data-type="pawn" data-color="black" title="卒">卒</button>
+      <span class="editor-gap"></span>
+      <button class="editor-piece-btn eraser-btn" data-type="eraser" title="擦除">✕</button>
+    </div>
+    <div class="editor-actions">
+      <button class="btn editor-action-btn" id="btnClearBoard">清空棋盘</button>
+      <button class="btn editor-confirm-btn" id="btnConfirmCustom">开始对弈</button>
+    </div>
+  </div>
+  <div class="board-wrapper">
+    <div class="board" id="board"></div>
+    <div class="check-warning" id="checkWarning"></div>
+  </div>
+  <div class="controls" id="controls">
+    <button class="btn undo" id="btnUndo">悔棋</button>
+    <button class="btn" id="btnNew">新游戏</button>
+    <button class="btn analyze" id="btnAnalyze">分析局面</button>
+  </div>
+  <div class="analysis-panel" id="analysisPanel" style="display:none">
+    <div class="analysis-header">
+      <span>局面分析</span>
+      <button class="analysis-close" id="btnAnalysisClose">&times;</button>
+    </div>
+    <div class="analysis-body" id="analysisBody">
+      <div class="analysis-score" id="analysisScore">--</div>
+      <div class="analysis-depth" id="analysisDepth"></div>
+      <div class="analysis-pv" id="analysisPv"></div>
+    </div>
+  </div>
+  <!-- 赛后分析面板 -->
+  <div class="postgame-panel" id="postgamePanel" style="display:none">
+    <div class="postgame-header">
+      <span>赛后分析</span>
+      <div class="postgame-progress" id="postgameProgress">分析中... <span id="postgameProgressText">0/0</span></div>
+      <button class="postgame-close" id="btnPostgameClose">&times;</button>
+    </div>
+    <div class="postgame-chart-wrap">
+      <canvas class="postgame-chart" id="postgameChart" width="360" height="130"></canvas>
+    </div>
+    <div class="postgame-move-list" id="postgameMoveList"></div>
+    <div class="postgame-stats" id="postgameStats" style="display:none">
+      <div class="postgame-stats-inner">
+        <div class="stats-quality">
+          <span class="sq-label">对局质量</span>
+          <span class="sq-red" id="sqRed">--</span>
+          <span class="sq-black" id="sqBlack">--</span>
+        </div>
+        <div class="stats-phases" id="statsPhases"></div>
+        <div class="stats-mistakes" id="statsMistakes"></div>
+        <div class="opening-info" id="openingInfo" style="display:none">
+          <span class="oi-label">开局</span>
+          <span class="oi-name" id="openingName">--</span>
+          <span class="oi-style" id="openingStyle">--</span>
+          <span class="oi-desc" id="openingDesc">--</span>
+        </div>
+      </div>
+    </div>
+    <div class="postgame-nav">
+      <button class="btn" id="btnPgnPrev">&lt; 上一步</button>
+      <span class="postgame-nav-info" id="postgameNavInfo">--</span>
+      <button class="btn" id="btnPgnNext">下一步 &gt;</button>
+    </div>
+    <div class="postgame-detail" id="postgameDetail">
+      <span class="postgame-detail-score" id="postgameDetailScore"></span>
+      <span class="postgame-detail-suggestion" id="postgameDetailSuggestion"></span>
+    </div>
+  </div>
+  <div class="message" id="message"></div>
+</div>
+
+<!-- 胜利提示 -->
+<div class="victory-message" id="victoryMessage"></div>
+
+<!-- QR 码大图显示覆盖层（主机展示给客机扫） -->
+<div class="qr-overlay" id="qrOverlay" style="display:none">
+  <div class="qr-overlay-box">
+    <div class="qr-overlay-title" id="qrOverlayTitle">扫描二维码</div>
+    <div class="qr-overlay-color" id="qrOverlayColorBlock" style="display:none">
+      <img class="qr-overlay-color-img" id="qrOverlayColorImg">
+      <div class="qr-overlay-hint" style="font-size:11px;">色块图（可截图分享）</div>
+    </div>
+    <div class="qr-overlay-code" id="qrOverlayCode"></div>
+    <div class="qr-overlay-hint" id="qrOverlayHint">请让对方扫描 · 保存时点「查看原图」</div>
+    <div class="qr-overlay-actions">
+      <button class="btn qr-action-btn" id="qrOverlayPrimaryBtn">下一步</button>
+      <button class="btn qr-cancel-btn" id="qrOverlayCloseBtn">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- QR 扫码覆盖层（摄像头扫描） -->
+<div class="qr-scanner-overlay" id="qrScannerOverlay" style="display:none">
+  <div class="qr-scanner-box">
+    <div class="qr-scanner-header">
+      <span class="qr-scanner-title">扫描二维码</span>
+      <button class="qr-scanner-close" id="qrScannerCloseBtn">&times;</button>
+    </div>
+    <div class="qr-scanner-viewport" id="qrScannerViewport"></div>
+    <div class="qr-scanner-hint">将二维码对准框内自动识别</div>
+  </div>
+</div>
+
+<!-- 隐藏的文件输入框，用于从图片扫码 -->
+<input type="file" accept="image/*" id="qrFileInput" style="display:none">
+
+<!-- 色块图文件输入 -->
+<input type="file" accept="image/*" id="colorFileInput" style="display:none">
+<input type="file" accept="image/*" id="answerFileInput" style="display:none">
+
+<!-- 特效覆盖层 -->
+<div class="effect-overlay" id="effectOverlay"></div>
+
+<!-- Wukong 纯 JS 中国象棋引擎 -->
+<script src="js/wukong-engine.js"></script>
+<!-- QR 码生成与扫码库 -->
+<script src="lib/qrcode.min.js"></script>
+<script src="lib/html5-qrcode.min.js"></script>
+<script src="lib/jsQR.min.js"></script>
+<script src="js/engine/stockfish.js"></script>
+
+<script src="js/main.js" type="module"></script>
+</body>
+</html>

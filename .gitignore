@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.next/
+
+# Android build
+android/app/build/
+*.apk
+*.aab
+*.aar
+*.dex
+*.ap_
+
+# Gradle
+.gradle/
+.gradle-home/
+
+# IDE & OS
+.DS_Store
+*.log
+.env
+
+# Vercel
+.vercel/
