@@ -145,13 +145,39 @@ navigator.serviceWorker.register('coi-serviceworker.js').then(function(reg){
     </div>
   </div>
 
-  <!-- 联机对战面板（SDP 直连模式） -->
+  <!-- 联机对战面板 -->
   <div class="online-panel" id="onlinePanel" style="display:none">
     <div class="online-section">
-      <span class="online-role" id="sdpRoleLabel">选择身份</span>
+      <span class="online-role" id="sdpRoleLabel">联机对战</span>
 
-      <!-- SDP 粘贴面板 -->
-      <div class="sdp-panel" id="sdpPanel">
+      <!-- 房间模式（推荐） -->
+      <div class="ws-room-panel" id="wsRoomPanel">
+        <button class="btn online-btn-host" id="btnCreateRoom">创建房间（红方先手）</button>
+        <div class="sdp-divider"><span>或</span></div>
+        <div class="ws-join-row">
+          <input type="text" class="online-input-url" id="wsRoomInput" placeholder="输入 6 位房间号" maxlength="6" autocomplete="off" inputmode="numeric" pattern="[0-9]*">
+          <button class="btn online-btn-join" id="btnJoinRoom">加入房间</button>
+        </div>
+        <div class="ws-room-error" id="wsRoomError" style="display:none"></div>
+        <div class="ws-fallback-link" id="wsFallbackLink" style="text-align:center;margin-top:12px;font-size:12px;color:#999;cursor:pointer" onclick="document.getElementById('sdpPanel').style.display=document.getElementById('sdpPanel').style.display==='none'?'block':'none';this.textContent=this.textContent.includes('手动')?'收起手动模式':'无网络？试试手动粘贴模式'">无网络？试试手动粘贴模式</div>
+      </div>
+
+      <!-- 房间信息（创建/加入后） -->
+      <div class="ws-room-info" id="wsRoomInfo" style="display:none">
+        <div class="ws-room-id-label">房间号</div>
+        <div class="ws-room-id-display" id="wsRoomDisplay">------</div>
+        <div class="ws-room-hint">将房间号发给对手，对方输入后即可自动连接</div>
+        <button class="btn sdp-copy-btn" id="btnCopyRoomId" style="margin-top:8px">复制房间号</button>
+      </div>
+
+      <!-- 等待配对 -->
+      <div class="ws-room-waiting" id="wsRoomWaiting" style="display:none">
+        <div class="ws-waiting-dot"></div>
+        <div class="ws-waiting-text">正在建立连接...</div>
+      </div>
+
+      <!-- SDP 粘贴面板（降级模式） -->
+      <div class="sdp-panel" id="sdpPanel" style="display:none">
         <button class="btn online-btn-host" id="btnHostSession">创建连接（红方先手）</button>
         <div class="sdp-divider"><span>或</span></div>
         <div class="sdp-join-row">
@@ -172,7 +198,6 @@ navigator.serviceWorker.register('coi-serviceworker.js').then(function(reg){
             <img class="color-preview-img" id="colorPreviewImg">
             <div class="color-preview-hint">长按图片保存 · 发给对方</div>
           </div>
-          <!-- 二维码预览 -->
           <div class="qr-preview" id="sdpQRPreview">
             <div class="qr-preview-code" id="sdpQRCode" title="点击放大"></div>
             <div class="color-preview" id="qrColorPreview" style="display:none">
@@ -183,7 +208,6 @@ navigator.serviceWorker.register('coi-serviceworker.js').then(function(reg){
           </div>
         </div>
 
-        <!-- 粘贴对手回复 -->
         <div class="sdp-input" id="sdpInput" style="display:none">
           <div class="sdp-label">粘贴对手回复的连接码</div>
           <div class="sdp-join-row">
@@ -301,6 +325,18 @@ navigator.serviceWorker.register('coi-serviceworker.js').then(function(reg){
     </div>
   </div>
   <div class="message" id="message"></div>
+</div>
+
+<!-- 悔棋请求确认对话框 -->
+<div class="undo-request-overlay" id="undoRequestOverlay" style="display:none">
+  <div class="undo-request-box">
+    <div class="undo-request-title">悔棋请求</div>
+    <div class="undo-request-body">对手请求悔棋，是否同意？</div>
+    <div class="undo-request-actions">
+      <button class="btn undo-agree-btn" id="btnUndoAgree">同意</button>
+      <button class="btn undo-deny-btn" id="btnUndoDeny">拒绝</button>
+    </div>
+  </div>
 </div>
 
 <!-- 胜利提示 -->

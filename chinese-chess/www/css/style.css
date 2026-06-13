@@ -432,6 +432,45 @@ body{
 }
 .online-btn-join:active,.sdp-copy-btn:active,.sdp-confirm-btn:active{transform:scale(0.95)}
 
+/* ============ 房间模式 UI ============ */
+.ws-room-panel{
+  display:flex;flex-direction:column;gap:8px;
+}
+.ws-join-row{
+  display:flex;gap:6px;
+}
+.ws-room-error{
+  font-size:12px;color:#c62828;text-align:center;padding:4px;
+}
+.ws-room-info{
+  display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 0;
+}
+.ws-room-id-label{
+  font-size:13px;color:#5d4037;
+}
+.ws-room-id-display{
+  font-size:36px;font-weight:bold;letter-spacing:6px;color:#3e2723;
+  font-family:monospace;
+}
+.ws-room-hint{
+  font-size:12px;color:#795548;text-align:center;
+}
+.ws-room-waiting{
+  display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 0;
+}
+.ws-waiting-dot{
+  width:32px;height:32px;border-radius:50%;
+  border:3px solid #c62828;border-top-color:transparent;
+  animation:ws-spin 0.8s linear infinite;
+}
+@keyframes ws-spin{to{transform:rotate(360deg)}}
+.ws-waiting-text{
+  font-size:14px;color:#5d4037;font-weight:bold;
+}
+.ws-fallback-link{
+  user-select:none;
+}
+
 /* ============ 旧联机对战面板（保留兼容） ============ */
 .online-panel{
   width:100%;max-width:440px;
@@ -1222,3 +1261,47 @@ body{
   background:rgba(255,213,79,0.15);color:#ffd54f;
 }
 .oi-desc{opacity:0.7;width:100%;font-size:10px}
+
+/* ============ 悔棋请求对话框 ============ */
+.undo-request-overlay{
+  position:fixed;top:0;left:0;right:0;bottom:0;
+  z-index:250;
+  display:flex;justify-content:center;align-items:center;
+  background:rgba(0,0,0,0.7);
+  animation:qrFadeIn 0.2s ease-out;
+}
+.undo-request-box{
+  background:linear-gradient(135deg,#fdf5e6 0%,#f5e6c8 100%);
+  border:2px solid #8b4513;
+  border-radius:14px;
+  padding:24px 20px 18px;
+  display:flex;flex-direction:column;align-items:center;
+  gap:16px;
+  max-width:300px;width:85%;
+  box-shadow:0 8px 36px rgba(0,0,0,0.5);
+  animation:qrScaleIn 0.25s cubic-bezier(0.175,0.885,0.32,1.275);
+}
+.undo-request-title{
+  font-family:'STKaiti','KaiTi','SimSun',serif;
+  font-size:22px;font-weight:bold;color:#3e2723;
+}
+.undo-request-body{
+  font-size:15px;color:#5d4037;text-align:center;
+}
+.undo-request-actions{
+  display:flex;gap:16px;
+}
+.undo-agree-btn{
+  padding:8px 24px;font-size:15px;font-weight:bold;
+  background:#c62828;color:#ffd54f;
+  border:2px solid #8b0000;border-radius:8px;
+  cursor:pointer;font-family:inherit;
+}
+.undo-agree-btn:active{transform:scale(0.95)}
+.undo-deny-btn{
+  padding:8px 24px;font-size:15px;
+  background:rgba(255,255,255,0.7);
+  border:1.5px solid #5d4037;border-radius:8px;
+  color:#5d4037;cursor:pointer;font-family:inherit;
+}
+.undo-deny-btn:active{transform:scale(0.95)}

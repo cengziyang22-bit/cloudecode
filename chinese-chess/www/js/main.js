@@ -1,6 +1,6 @@
 // main.js — ES Module 入口
 import { RED, BLACK, PIECE } from './board.js';
-import { initGame, newGame, setGameMode, cleanupGame, triggerAnalysis, closeAnalysis, startPostGameAnalysis, getGameMode, undoMove, goToAnalysisPrev, goToAnalysisNext, closePostGameAnalysis, clearEditBoard, confirmCustomGame, editSelectPiece, hostOnlineSession, resignOnline } from './game.js';
+import { initGame, newGame, setGameMode, cleanupGame, triggerAnalysis, closeAnalysis, startPostGameAnalysis, getGameMode, undoMove, goToAnalysisPrev, goToAnalysisNext, closePostGameAnalysis, clearEditBoard, confirmCustomGame, editSelectPiece, hostOnlineSession, resignOnline, createOnlineRoom, joinOnlineRoom, acceptUndoRequest, rejectUndoRequest } from './game.js';
 import { acceptOffer, connectGuest, disconnect, isConnected, compressSDP, normalizeSDP, generateColorImage, decodeColorImage } from './online.js';
 
 // ============ UI Event Bindings ============
@@ -107,6 +107,36 @@ document.getElementById('btnPgnNext').addEventListener('click', function() {
 });
 
 // --- 联机对战 ---
+
+// 信令模式：创建房间
+document.getElementById('btnCreateRoom').addEventListener('click', function() {
+  createOnlineRoom();
+});
+
+// 信令模式：加入房间
+document.getElementById('btnJoinRoom').addEventListener('click', function() {
+  var roomId = document.getElementById('wsRoomInput').value.trim();
+  if (!roomId || roomId.length !== 6 || !/^\d{6}$/.test(roomId)) {
+    document.getElementById('wsRoomError').textContent = '请输入 6 位数字房间号';
+    document.getElementById('wsRoomError').style.display = 'block';
+    return;
+  }
+  document.getElementById('wsRoomError').style.display = 'none';
+  joinOnlineRoom(roomId);
+});
+
+// 复制房间号
+document.getElementById('btnCopyRoomId').addEventListener('click', function() {
+  var roomId = document.getElementById('wsRoomDisplay').textContent;
+  navigator.clipboard.writeText(roomId).then(function() {
+    var btn = document.getElementById('btnCopyRoomId');
+    var orig = btn.textContent;
+    btn.textContent = '已复制!';
+    setTimeout(function() { btn.textContent = orig; }, 1500);
+  }).catch(function() {});
+});
+
+// SDP 粘贴模式（降级）
 document.getElementById('btnHostSession').addEventListener('click', function() {
   hostOnlineSession();
 });
@@ -147,6 +177,15 @@ document.getElementById('btnCopySdp').addEventListener('click', function() {
 
 document.getElementById('btnOnlineResign').addEventListener('click', function() {
   resignOnline();
+});
+
+// 悔棋请求对话框
+document.getElementById('btnUndoAgree').addEventListener('click', function() {
+  acceptUndoRequest();
+});
+
+document.getElementById('btnUndoDeny').addEventListener('click', function() {
+  rejectUndoRequest();
 });
 
 // --- QR 扫码按钮 ---

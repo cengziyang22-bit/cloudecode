@@ -1,9 +1,10 @@
-// online.js — 联机对战 WebRTC 直连（SDP 粘贴 + QR 双阶段握手）
-// 零服务器、零注册：一人复制连接码发给对方即可 P2P 对弈
-// QR 模式：第一阶段只交换最小 SDP（仅 host candidate），
-//          确保二维码轻量可扫，STUN/公网候选靠 DataChannel 补发
+// online.js — 联机对战 WebRTC（信令服务器 + SDP 粘贴双模式）
+// 优先使用信令服务器自动交换 SDP，降级到手动粘贴/QR 扫码
 // 适用场景：同一WiFi / 热点 / 局域网（互联网P2P因CGNAT可能失败）
 'use strict';
+
+// 信令服务器地址（部署 Cloudflare Workers 后替换为实际地址）
+const SIGNALING_SERVER = 'https://chinese-chess-signaling.2023qm.workers.dev';
 
 // 多 STUN 服务器提高 candidate 获取成功率
 const STUN_SERVERS = {
@@ -23,6 +24,8 @@ let _color = null;    // 'red' | 'black'
 let _fullSDPEncoded = null; // ICE 收集完成后的完整 SDP（含 candidates）
 let _dcConnected = false;   // DataChannel 是否曾经成功打开过
 let _failedTimer = null;    // failed 延迟确认定时器
+let _ws = null;             // 信令 WebSocket
+let _wsRoomId = null;       // 当前信令房间号
 
 let _callbacks = {
   roomCreated: null,       // (roomId) - 主机：SDP已就绪
@@ -35,6 +38,9 @@ let _callbacks = {
   error: null,
   qrOfferReady: null,      // (sdp) QR 主机 SDP 就绪
   qrAnswerReady: null,     // (sdp) QR 客机 Answer 就绪
+  roomReady: null,         // ({ roomId }) - 信令房间双方就绪
+  undoRequest: null,       // () - 对手请求悔棋
+  undoResponse: null,      // (accepted: boolean) - 对手回复悔棋请求
 };
 
 // ============ 公开 API ============
@@ -159,6 +165,7 @@ export function acceptOffer(encodedOffer, onAnswerReady) {
 }
 
 export function disconnect() {
+  _cleanupWs();
   if (_failedTimer) { clearTimeout(_failedTimer); _failedTimer = null; }
   if (_dc) { _dc.close(); _dc = null; }
   if (_pc) { _pc.close(); _pc = null; }
@@ -167,6 +174,142 @@ export function disconnect() {
   _color = null;
   _dcConnected = false;
 }
+
+// ============ WebSocket 信令模式（推荐） ============
+
+// 创建房间 → 返回 6 位房间号，等待对手加入
+export async function createRoom() {
+  try {
+    var resp = await fetch(SIGNALING_SERVER + '/api/create', { method: 'POST' });
+    var data = await resp.json();
+    if (!data.roomId) throw new Error('创建房间失败');
+    _wsRoomId = data.roomId;
+    _isHost = true;
+    _color = 'red';
+    _connectWs();
+    return data.roomId;
+  } catch(e) {
+    if (_callbacks.error) _callbacks.error('创建房间失败: ' + e.message);
+    throw e;
+  }
+}
+
+// 加入房间（输入房间号）
+export function joinRoom(roomId) {
+  _wsRoomId = roomId;
+  _isHost = false;
+  _color = 'black';
+  _connectWs();
+}
+
+// 离开信令房间
+export function leaveRoom() {
+  _cleanupWs();
+  disconnect();
+}
+
+function _connectWs() {
+  var roomId = _wsRoomId;
+  _cleanupWs();
+  _wsRoomId = roomId;
+  var wsUrl = SIGNALING_SERVER.replace('https://', 'wss://') + '/room/' + _wsRoomId;
+  var ws = new WebSocket(wsUrl);
+  _ws = ws;
+
+  ws.onopen = function() {
+    console.log('[WS] 已连接房间 ' + _wsRoomId);
+  };
+
+  ws.onmessage = function(e) {
+    var msg;
+    try { msg = JSON.parse(e.data); } catch(_) { return; }
+    _onWsMessage(msg);
+  };
+
+  ws.onclose = function() {
+    console.log('[WS] 断开');
+    _ws = null;
+  };
+
+  ws.onerror = function() {
+    console.warn('[WS] 连接错误');
+    if (_callbacks.error) _callbacks.error('信令服务器连接失败，请尝试手动粘贴模式');
+  };
+}
+
+function _cleanupWs() {
+  if (_ws) {
+    try { _ws.close(); } catch(e) {}
+    _ws = null;
+  }
+  _wsRoomId = null;
+}
+
+async function _onWsMessage(msg) {
+  switch (msg.type) {
+    case 'role':
+      // 服务器分配的角色
+      console.log('[WS] 角色: ' + msg.role);
+      break;
+
+    case 'ready':
+      console.log('[WS] 双方就绪');
+      if (_callbacks.roomReady) _callbacks.roomReady({ roomId: _wsRoomId });
+      if (_isHost) {
+        _createPeer();
+        _dc = _pc.createDataChannel('game');
+        _setupDataChannel();
+        _waitForIce(function(sdp) {
+          console.log('[WS] 发送Offer,长度=' + sdp.length);
+          _sendWs({ type: 'sdp', sdp: sdp });
+        });
+        try {
+          var offer = await _pc.createOffer();
+          await _pc.setLocalDescription(offer);
+        } catch(e) {
+          if (_callbacks.error) _callbacks.error('创建Offer失败: ' + e.message);
+        }
+      } else {
+        _createPeer();
+        _pc.ondatachannel = function(e) { _dc = e.channel; _setupDataChannel(); };
+      }
+      break;
+
+    case 'sdp':
+      if (!msg.sdp) return;
+      console.log('[WS] 收到SDP,长度=' + msg.sdp.length);
+      try {
+        var desc = JSON.parse(atob(msg.sdp));
+        if (!_isHost) {
+          _waitForIce(function(sdp) {
+            console.log('[WS] 发送Answer,长度=' + sdp.length);
+            _sendWs({ type: 'sdp', sdp: sdp });
+          });
+        }
+        await _pc.setRemoteDescription(new RTCSessionDescription(desc));
+        if (!_isHost) {
+          var answer = await _pc.createAnswer();
+          await _pc.setLocalDescription(answer);
+        }
+      } catch(e) {
+        console.error('[WS] SDP处理失败:', e.message);
+        if (_callbacks.error) _callbacks.error('SDP交换失败: ' + e.message);
+      }
+      break;
+
+    case 'peer-disconnected':
+      if (_callbacks.opponentDisconnected) _callbacks.opponentDisconnected();
+      break;
+  }
+}
+
+function _sendWs(data) {
+  if (_ws && _ws.readyState === WebSocket.OPEN) {
+    _ws.send(JSON.stringify(data));
+  }
+}
+
+// ============ 原有 SDP 粘贴模式（降级） ============
 
 export function sendMove(fromR, fromC, toR, toC) {
   _sendDC({ type: 'move', move: { fromR, fromC, toR, toC } });
@@ -178,6 +321,14 @@ export function sendResign() {
 
 export function sendChat(text) {
   _sendDC({ type: 'chat', text });
+}
+
+export function sendUndoRequest() {
+  _sendDC({ type: 'undo-request' });
+}
+
+export function sendUndoResponse(accepted) {
+  _sendDC({ type: 'undo-response', accepted: accepted });
 }
 
 export function getMyColor() { return _color; }
@@ -192,6 +343,9 @@ export function onOpponentDisconnected(cb) { _callbacks.opponentDisconnected = c
 export function onChat(cb) { _callbacks.chat = cb; }
 export function onError(cb) { _callbacks.error = cb; }
 export function onIceFailed(cb) { _callbacks.iceFailed = cb; }
+export function onRoomReady(cb) { _callbacks.roomReady = cb; }
+export function onUndoRequest(cb) { _callbacks.undoRequest = cb; }
+export function onUndoResponse(cb) { _callbacks.undoResponse = cb; }
 
 // ============ 内部 ============
 
@@ -287,6 +441,12 @@ function _setupDataChannel() {
         break;
       case 'sdp_sync':
         _handleSDPSync(msg.sdp);
+        break;
+      case 'undo-request':
+        if (_callbacks.undoRequest) _callbacks.undoRequest();
+        break;
+      case 'undo-response':
+        if (_callbacks.undoResponse) _callbacks.undoResponse(msg.accepted);
         break;
     }
   };

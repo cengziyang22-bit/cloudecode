@@ -13,7 +13,9 @@ import { hostSession, connectGuest, acceptOffer, disconnect, sendMove, sendResig
          onRoomCreated, onGameStart, onOpponentMove, onOpponentResigned,
          onOpponentDisconnected, onIceFailed, onChat, onError,
          compressSDP, normalizeSDP,
-         getMyColor, isConnected } from './online.js';
+         createRoom, joinRoom, leaveRoom, onRoomReady,
+         getMyColor, isConnected,
+         sendUndoRequest, sendUndoResponse, onUndoRequest, onUndoResponse } from './online.js';
 import { playMoveSound, playCaptureSound, playCheckSound, playCheckmateSound, preloadSounds, playCheckmateTypeVoice } from './sound.js';
 import { detectCheckmateType } from './checkmate.js';
 import { identifyOpening } from './opening-book.js';
@@ -27,6 +29,7 @@ let analysisHint = null; // { fromR, fromC, toR, toC } | null
 let onlineReady = false;      // 联机房间双方就绪
 
 let onlineColor = null;       // 我方颜色 (RED/BLACK)
+let undoRequestPending = false; // 悔棋请求待回复
 let isEditing = false;        // 编辑器模式
 let editorPiece = { type: PIECE.GENERAL, color: RED }; // 编辑器当前选中棋子
 
@@ -154,7 +157,11 @@ export function initGame(mode, settings) {
     setupOnlineCallbacks();
     document.getElementById('onlinePanel').style.display = 'flex';
     document.getElementById('onlineStatusBar').style.display = 'none';
-    document.getElementById('sdpPanel').style.display = 'flex';
+    document.getElementById('wsRoomPanel').style.display = 'flex';
+    document.getElementById('wsRoomInfo').style.display = 'none';
+    document.getElementById('wsRoomWaiting').style.display = 'none';
+    document.getElementById('wsRoomError').style.display = 'none';
+    document.getElementById('sdpPanel').style.display = 'none';
     document.getElementById('sdpOutput').style.display = 'none';
     document.getElementById('sdpInput').style.display = 'none';
     onlineReady = false;
@@ -251,7 +258,11 @@ export function setGameMode(mode) {
     setupOnlineCallbacks();
     document.getElementById('onlinePanel').style.display = 'flex';
     document.getElementById('onlineStatusBar').style.display = 'none';
-    document.getElementById('sdpPanel').style.display = 'flex';
+    document.getElementById('wsRoomPanel').style.display = 'flex';
+    document.getElementById('wsRoomInfo').style.display = 'none';
+    document.getElementById('wsRoomWaiting').style.display = 'none';
+    document.getElementById('wsRoomError').style.display = 'none';
+    document.getElementById('sdpPanel').style.display = 'none';
     document.getElementById('sdpOutput').style.display = 'none';
     document.getElementById('sdpInput').style.display = 'none';
   }
@@ -1156,9 +1167,16 @@ export function closePostGameAnalysis() {
   render();
 }
 
-// ============ 悔棋（人机模式撤回两步） ============
+// ============ 悔棋 ============
 export function undoMove() {
-  if (gameOver || aiThinking || gameMode === 'online') return;
+  if (gameOver || aiThinking) return;
+  if (gameMode === 'online') {
+    if (!onlineReady || moveHistory.length === 0 || undoRequestPending) return;
+    undoRequestPending = true;
+    sendUndoRequest();
+    showMessage('已发送悔棋请求，等待对方回复...');
+    return;
+  }
   var steps = (gameMode === 'ai') ? 2 : 1;
   for (var i = 0; i < steps && moveHistory.length > 0; i++) {
     doUndoOne();
@@ -1339,6 +1357,8 @@ function setupOnlineCallbacks() {
     onlineColor = data.color === 'red' ? RED : BLACK;
     onlineReady = true;
     document.getElementById('onlinePanel').style.display = 'none';
+    document.getElementById('wsRoomInfo').style.display = 'none';
+    document.getElementById('wsRoomWaiting').style.display = 'none';
     document.getElementById('onlineStatusBar').style.display = 'flex';
     document.getElementById('onlineBarColor').textContent = onlineColor === RED ? '红' : '黑';
     newGame();
@@ -1385,10 +1405,63 @@ function setupOnlineCallbacks() {
     var el = document.getElementById('sdpError');
     if (el) { el.textContent = msg; el.style.display = 'block'; }
   });
+
+  onRoomReady(function(data) {
+    // 信令模式：双方通过 WebSocket 配对成功
+    onlineColor = getMyColor() === 'red' ? RED : BLACK;
+    var el = document.getElementById('wsRoomDisplay');
+    if (el) el.textContent = data.roomId;
+    document.getElementById('wsRoomPanel').style.display = 'none';
+    document.getElementById('wsRoomWaiting').style.display = 'flex';
+    document.getElementById('sdpRoleLabel').textContent = onlineColor === RED ? '红方（先手）' : '黑方（后手）';
+  });
+
+  onUndoRequest(function() {
+    // 对手请求悔棋 → 弹出确认框
+    var overlay = document.getElementById('undoRequestOverlay');
+    if (overlay) overlay.style.display = 'flex';
+  });
+
+  onUndoResponse(function(accepted) {
+    undoRequestPending = false;
+    document.getElementById('message').style.display = 'none';
+    if (accepted) {
+      if (moveHistory.length > 0) doUndoOne();
+      showMessage('对方同意悔棋');
+      setTimeout(function() { document.getElementById('message').style.display = 'none'; }, 2000);
+    } else {
+      showMessage('对方拒绝悔棋');
+      setTimeout(function() { document.getElementById('message').style.display = 'none'; }, 2000);
+    }
+  });
 }
 
-// ============ 联机对战公开 API（SDP 粘贴模式）============
+// ============ 联机对战公开 API ============
 
+// 信令模式：创建房间
+export async function createOnlineRoom() {
+  try {
+    var roomId = await createRoom();
+    document.getElementById('wsRoomDisplay').textContent = roomId;
+    document.getElementById('wsRoomPanel').style.display = 'none';
+    document.getElementById('wsRoomInfo').style.display = 'flex';
+    document.getElementById('sdpRoleLabel').textContent = '红方（先手）等待对手...';
+  } catch(e) {
+    document.getElementById('wsRoomError').textContent = e.message;
+    document.getElementById('wsRoomError').style.display = 'block';
+  }
+}
+
+// 信令模式：加入房间
+export function joinOnlineRoom(roomId) {
+  joinRoom(roomId);
+  document.getElementById('wsRoomPanel').style.display = 'none';
+  document.getElementById('wsRoomInfo').style.display = 'flex';
+  document.getElementById('wsRoomDisplay').textContent = roomId;
+  document.getElementById('sdpRoleLabel').textContent = '黑方（后手）等待配对...';
+}
+
+// SDP 粘贴模式：主机创建会话
 export function hostOnlineSession() {
   hostSession(null);
 }
@@ -1416,16 +1489,35 @@ export function resignOnline() {
 }
 
 export function leaveOnlineRoom() {
+  leaveRoom();
   disconnect();
   onlineReady = false;
   onlineColor = null;
+  undoRequestPending = false;
   document.getElementById('onlinePanel').style.display = 'flex';
   document.getElementById('onlineStatusBar').style.display = 'none';
-  document.getElementById('sdpPanel').style.display = 'flex';
+  document.getElementById('wsRoomPanel').style.display = 'flex';
+  document.getElementById('wsRoomInfo').style.display = 'none';
+  document.getElementById('wsRoomWaiting').style.display = 'none';
+  document.getElementById('wsRoomError').style.display = 'none';
+  document.getElementById('sdpPanel').style.display = 'none';
   document.getElementById('sdpOutput').style.display = 'none';
   document.getElementById('sdpInput').style.display = 'none';
   document.getElementById('sdpError').style.display = 'none';
   newGame();
+}
+
+// 联机悔棋：同意对方请求 → 撤销自己最后一步，发送同意
+export function acceptUndoRequest() {
+  document.getElementById('undoRequestOverlay').style.display = 'none';
+  sendUndoResponse(true);
+  if (moveHistory.length > 0) doUndoOne();
+}
+
+// 联机悔棋：拒绝对方请求
+export function rejectUndoRequest() {
+  document.getElementById('undoRequestOverlay').style.display = 'none';
+  sendUndoResponse(false);
 }
 
 export function getOnlineReady() { return onlineReady; }
